@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# kpget - retrieve a field from a KeePass entry using the cached master password.
+#
+# Usage:
+#   kpget <entry-path>             # default: print Password attribute
+#   kpget <entry-path> -a Username # any keepassxc-cli show option
+#
+# Configuration: see kpunlock(1).
+
+set -euo pipefail
+
+CACHE="${KPCACHE_FILE:-/dev/shm/$(id -u)-kpcache}"
+CONFIG="${KPCACHE_CONFIG:-$HOME/.config/kpcache/config}"
+
+if [[ -f "$CONFIG" ]]; then
+  # shellcheck source=/dev/null
+  source "$CONFIG"
+fi
+
+DB="${KP_DB:-${KPCACHE_DB:-}}"
+KEYFILE="${KP_KEYFILE:-${KPCACHE_KEYFILE:-}}"
+
+if [[ -z "$DB" ]]; then
+  echo "❌ No database configured (set \$KP_DB or KPCACHE_DB in config)." >&2
+  exit 1
+fi
+
+if [[ $# -lt 1 ]]; then
+  echo "Usage: kpget <entry-path> [keepassxc-cli show options...]" >&2
+  exit 2
+fi
+
+if [[ ! -f "$CACHE" ]]; then
+  echo "❌ No cached master password - run 'kpunlock' first." >&2
+  exit 1
+fi
+
+# Optional TTL check (portable mtime - GNU stat -c, BSD/macOS stat -f)
+if [[ -n "${KPCACHE_TTL:-}" ]]; then
+  if mtime=$(stat -c %Y "$CACHE" 2>/dev/null); then :
+  elif mtime=$(stat -f %m "$CACHE" 2>/dev/null); then :
+  else
+    echo "❌ Could not read cache mtime - run 'kpunlock' again." >&2
+    exit 1
+  fi
+  age=$(( $(date +%s) - mtime ))
+  if (( age > KPCACHE_TTL )); then
+    rm -f "$CACHE"
+    echo "❌ Cache expired (>${KPCACHE_TTL}s) - run 'kpunlock' again." >&2
+    exit 1
+  fi
+fi
+
+ENTRY="$1"; shift
+
+# Default to Password attribute when no show options given
+if [[ "$#" -eq 0 ]]; then
+  set -- -s -a Password
+fi
+
+extra_args=()
+[[ -n "$KEYFILE" ]] && extra_args+=(--key-file "$KEYFILE")
+
+if ! keepassxc-cli show -q "${extra_args[@]}" "$@" "$DB" -- "$ENTRY" < "$CACHE"; then
+  echo "❌ keepassxc-cli failed - cache may be stale, try 'kpunlock'." >&2
+  exit 1
+fi

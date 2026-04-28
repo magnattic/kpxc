@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# kplock - clear the cached KeePass master password.
+#
+# Note: shred has no effect on tmpfs (RAM-backed, no physical blocks),
+# so we just unlink - the kernel reclaims the pages.
+
+CONFIG="${KPCACHE_CONFIG:-$HOME/.config/kpcache/config}"
+if [[ -f "$CONFIG" ]]; then
+  # shellcheck source=/dev/null
+  source "$CONFIG"
+fi
+
+CACHE="${KPCACHE_FILE:-/dev/shm/$(id -u)-kpcache}"
+
+if [[ -f "$CACHE" ]]; then
+  rm -f "$CACHE"
+  echo "✓ Cache cleared"
+else
+  echo "(no cache)"
+fi

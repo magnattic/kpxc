@@ -1,0 +1,26 @@
+# isync / mbsync example
+# https://isync.sourceforge.io/
+#
+# Place at ~/.mbsyncrc
+
+IMAPAccount personal
+Host imap.example.com
+User you@example.com
+PassCmd "+kpget 'Email/personal'"
+TLSType IMAPS
+
+IMAPStore personal-remote
+Account personal
+
+MaildirStore personal-local
+Path ~/Maildir/personal/
+Inbox ~/Maildir/personal/INBOX
+Subfolders Verbatim
+
+Channel personal
+Far :personal-remote:
+Near :personal-local:
+Patterns *
+Create Both
+Expunge Both
+SyncState *

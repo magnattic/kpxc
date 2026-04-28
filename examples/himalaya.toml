@@ -1,0 +1,18 @@
+# himalaya CLI mail client - https://pimalaya.org/himalaya/
+# Tested with himalaya v1.2+. Older v0.x uses different config keys
+# (e.g. imap-passwd-cmd) - check the himalaya docs for your version.
+#
+# Place at ~/.config/himalaya/config.toml
+
+[accounts.personal]
+default = true
+email = "you@example.com"
+display-name = "Your Name"
+
+backend.type = "imap"
+backend.host = "imap.example.com"
+backend.port = 993
+backend.encryption.type = "tls"
+backend.login = "you@example.com"
+backend.auth.type = "password"
+backend.auth.cmd = "kpget Email/personal"

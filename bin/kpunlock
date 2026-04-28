@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+# kpunlock - cache the KeePassXC master password in tmpfs for the session.
+#
+# Reads the master password from a TTY prompt, verifies it against the
+# database via keepassxc-cli, then stores it at:
+#
+#   /dev/shm/$(id -u)-kpcache
+#
+# with mode 0600. The cache lives until reboot or `kplock`. Optionally
+# expires after $KPCACHE_TTL seconds (checked at read-time by `kpget`).
+#
+# Configuration (in order of precedence):
+#   1. $KP_DB env var
+#   2. $KPCACHE_DB in ~/.config/kpcache/config
+#   3. error if neither is set
+
+set -euo pipefail
+
+CACHE="${KPCACHE_FILE:-/dev/shm/$(id -u)-kpcache}"
+CONFIG="${KPCACHE_CONFIG:-$HOME/.config/kpcache/config}"
+
+# Load config if present
+if [[ -f "$CONFIG" ]]; then
+  # shellcheck source=/dev/null
+  source "$CONFIG"
+fi
+
+DB="${KP_DB:-${KPCACHE_DB:-}}"
+KEYFILE="${KP_KEYFILE:-${KPCACHE_KEYFILE:-}}"
+
+if [[ -z "$DB" ]]; then
+  cat >&2 <<EOF
+❌ No KeePass database configured.
+
+Set one of:
+  - \$KP_DB env var
+  - KPCACHE_DB in $CONFIG
+
+Example config:
+  KPCACHE_DB="/path/to/db.kdbx"
+  KPCACHE_KEYFILE="/path/to/keyfile"   # optional
+EOF
+  exit 1
+fi
+
+if [[ ! -f "$DB" ]]; then
+  echo "❌ Database not found: $DB" >&2
+  exit 1
+fi
+
+if [[ ! -t 0 ]]; then
+  echo "❌ kpunlock requires a TTY for password entry." >&2
+  exit 1
+fi
+
+cleanup_on_fail() { rm -f "$CACHE"; unset PW 2>/dev/null || true; }
+trap cleanup_on_fail ERR INT TERM
+
+IFS= read -rsp "KeePass master password: " PW
+echo
+
+umask 077
+install -m 600 /dev/null "$CACHE"
+printf '%s' "$PW" > "$CACHE"
+unset PW
+
+# Verify against the database
+verify_args=()
+[[ -n "$KEYFILE" ]] && verify_args+=(--key-file "$KEYFILE")
+
+if ! keepassxc-cli ls "${verify_args[@]}" "$DB" < "$CACHE" > /dev/null 2>&1; then
+  rm -f "$CACHE"
+  echo "❌ Wrong password - cache not stored." >&2
+  exit 1
+fi
+
+trap - ERR INT TERM
+echo "✓ Master password cached at $CACHE"
+echo "  Lives until reboot or 'kplock'${KPCACHE_TTL:+ (or after ${KPCACHE_TTL}s - checked by kpget)}"

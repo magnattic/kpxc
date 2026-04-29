@@ -23,15 +23,29 @@ set -euo pipefail
 CACHE="${KP_CACHE:-/dev/shm/$(id -u)-kpxc}"
 CONFIG="${KP_CONFIG:-$HOME/.config/kpxc/config}"
 
-if [[ -f "$CONFIG" ]]; then
+_safe_source() {
+  local cfg="$1"
+  [[ -f "$cfg" ]] || return 0
+  if [[ ! -O "$cfg" ]]; then
+    echo "kpxc: refusing to source $cfg (not owned by you)." >&2
+    return 1
+  fi
+  local perms
+  perms=$(ls -ld "$cfg" 2>/dev/null | awk '{print $1}')
+  if [[ "${perms:5:1}" == "w" || "${perms:8:1}" == "w" ]]; then
+    echo "kpxc: refusing to source $cfg (group/world-writable)." >&2
+    return 1
+  fi
   # shellcheck source=/dev/null
-  source "$CONFIG"
-fi
+  source "$cfg"
+}
+
+_safe_source "$CONFIG"
 
 DB="${KP_DB:-}"
 KEYFILE="${KP_KEYFILE:-}"
 
-if [[ $# -lt 1 ]]; then
+_usage() {
   cat >&2 <<EOF
 Usage: kpxc <subcommand> [args...]
 
@@ -45,24 +59,87 @@ Examples:
   kpxc db-info
 EOF
   exit 2
-fi
+}
+
+[[ $# -lt 1 ]] && _usage
 
 SUBCMD="$1"; shift
 
-# Subcommands that don't need an unlocked database, pass through directly.
+# 1. Subcommands that don't need an unlocked database, pass through directly.
 case "$SUBCMD" in
-  estimate|generate|diceware|--help|-h|--version|-v)
+  estimate|generate|diceware|help|--help|-h|--version|-v)
     exec keepassxc-cli "$SUBCMD" "$@"
     ;;
 esac
 
+# 2. Subcommand --help anywhere in args - skip DB injection so help renders.
+for arg in "$@"; do
+  case "$arg" in
+    --help|-h)
+      exec keepassxc-cli "$SUBCMD" "$@"
+      ;;
+  esac
+done
+
+# 3. Subcommands with non-standard argument shapes (DB position differs, or
+#    creates a new database from another input). Wrapping these would either
+#    fail with confusing errors or, worse, silently reorder args and target
+#    the wrong file. Refuse and point at keepassxc-cli directly.
+case "$SUBCMD" in
+  db-create|import|open|close|merge)
+    cat >&2 <<EOF
+kpxc: '$SUBCMD' has a non-standard argument shape and is not safe to wrap.
+Invoke keepassxc-cli directly:
+
+  keepassxc-cli $SUBCMD ...
+EOF
+    exit 2
+    ;;
+esac
+
+# 4. Subcommands that may prompt for additional passwords on stdin would
+#    silently consume EOF (since cache holds only the master password) and
+#    create entries with empty passwords. Refuse the password-prompt flags.
+case "$SUBCMD" in
+  add|edit)
+    for arg in "$@"; do
+      case "$arg" in
+        -p|--password-prompt)
+          cat >&2 <<EOF
+kpxc: '$SUBCMD -p' needs interactive entry-password input that this wrapper
+cannot supply from the cache. Invoke keepassxc-cli directly:
+
+  keepassxc-cli $SUBCMD -p ...
+EOF
+          exit 2
+          ;;
+      esac
+    done
+    ;;
+  db-edit)
+    for arg in "$@"; do
+      case "$arg" in
+        -p|--set-password)
+          cat >&2 <<EOF
+kpxc: '$SUBCMD $arg' needs interactive password input. Invoke keepassxc-cli
+directly:
+
+  keepassxc-cli $SUBCMD $arg ...
+EOF
+          exit 2
+          ;;
+      esac
+    done
+    ;;
+esac
+
 if [[ -z "$DB" ]]; then
-  echo "No database configured (set \$KP_DB env var or KP_DB= in config)." >&2
+  echo "kpxc: no database configured (set \$KP_DB env var or KP_DB= in config)." >&2
   exit 1
 fi
 
 if [[ ! -f "$CACHE" ]]; then
-  echo "No cached master password - run 'kpunlock' first." >&2
+  echo "kpxc: no cached master password - run 'kpunlock' first." >&2
   exit 1
 fi
 
@@ -71,13 +148,12 @@ if [[ -n "${KP_TTL:-}" ]]; then
   if mtime=$(stat -c %Y "$CACHE" 2>/dev/null); then :
   elif mtime=$(stat -f %m "$CACHE" 2>/dev/null); then :
   else
-    echo "Could not read cache mtime - run 'kpunlock' again." >&2
+    echo "kpxc: could not read cache mtime - run 'kpunlock' again." >&2
     exit 1
   fi
   age=$(( $(date +%s) - mtime ))
   if (( age > KP_TTL )); then
-    rm -f "$CACHE"
-    echo "Cache expired (>${KP_TTL}s) - run 'kpunlock' again." >&2
+    echo "kpxc: cache expired (>${KP_TTL}s) - run 'kpunlock' again." >&2
     exit 1
   fi
 fi
@@ -86,5 +162,7 @@ extra_args=()
 [[ -n "$KEYFILE" ]] && extra_args+=(--key-file "$KEYFILE")
 
 # Inject DB right after the subcommand. keepassxc-cli (Qt CommandLineParser)
-# accepts options in any position, so this works for show/ls/search/db-info/etc.
+# accepts options in any position, so this works for show/ls/search/db-info
+# and the other unlock-required subcommands with the standard "subcmd database
+# entry" shape.
 exec keepassxc-cli "$SUBCMD" "${extra_args[@]}" "$DB" "$@" < "$CACHE"

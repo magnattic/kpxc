@@ -120,6 +120,46 @@ generated="$(kpxc generate -L 12 -l -U -n)"
 check "kpxc generate produces 12 chars" "12" "${#generated}"
 
 echo
+echo "## kpxc denylists (refuses unsafe / mutating subcommands)"
+prime_cache
+check_fails "kpxc db-create refuses (non-standard arg shape)" \
+  kpxc db-create "$WORKDIR/new.kdbx"
+check_fails "kpxc import refuses (would overwrite target)" \
+  kpxc import "$WORKDIR/source.xml" "$WORKDIR/dest.kdbx"
+check_fails "kpxc open refuses" kpxc open "$WORKDIR/other.kdbx"
+check_fails "kpxc add -p refuses (would create empty-pw entry)" \
+  kpxc add -p -u alice "Email/new"
+check_fails "kpxc edit -p refuses" kpxc edit -p "Email/personal"
+check_fails "kpxc db-edit -p refuses" kpxc db-edit -p
+check_fails "kpxc db-edit --set-password refuses" kpxc db-edit --set-password
+check_contains "kpxc add (no -p) is allowed and creates entry" "Successfully" \
+  "$(kpxc add -u bob "Email/no-pw" 2>&1)"
+
+echo
+echo "## kpxc subcommand --help passthrough"
+# keepassxc-cli exits non-zero on --help (its arg parser flags missing
+# positionals before checking the help flag), so allow non-zero here.
+help_out="$(kpxc show --help 2>&1 || true)"
+check_contains "kpxc show --help renders help (no DB injection)" \
+  "Show an entry" "$help_out"
+help_out="$(kpxc ls -h 2>&1 || true)"
+check_contains "kpxc ls -h renders help" "List database" "$help_out"
+
+echo
+echo "## config permission check (security)"
+PERM_CONFIG="$WORKDIR/perm-test-config"
+echo 'KP_DB='"$DB" > "$PERM_CONFIG"
+chmod 644 "$PERM_CONFIG"   # group/world-readable but world-writable is the threat
+chmod 666 "$PERM_CONFIG"
+check_fails "kpget refuses world-writable config" \
+  env KP_CONFIG="$PERM_CONFIG" kpget Email/personal
+check_fails "kpxc refuses world-writable config" \
+  env KP_CONFIG="$PERM_CONFIG" kpxc ls /
+chmod 600 "$PERM_CONFIG"
+check "kpget accepts 0600 config" "secret123" \
+  "$(env KP_CONFIG="$PERM_CONFIG" kpget Email/personal)"
+
+echo
 echo "## TTL expiry"
 prime_cache
 sleep 1

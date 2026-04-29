@@ -19,18 +19,31 @@ set -euo pipefail
 CACHE="${KP_CACHE:-/dev/shm/$(id -u)-kpxc}"
 CONFIG="${KP_CONFIG:-$HOME/.config/kpxc/config}"
 
-# Load config if present
-if [[ -f "$CONFIG" ]]; then
+_safe_source() {
+  local cfg="$1"
+  [[ -f "$cfg" ]] || return 0
+  if [[ ! -O "$cfg" ]]; then
+    echo "kpunlock: refusing to source $cfg (not owned by you)." >&2
+    return 1
+  fi
+  local perms
+  perms=$(ls -ld "$cfg" 2>/dev/null | awk '{print $1}')
+  if [[ "${perms:5:1}" == "w" || "${perms:8:1}" == "w" ]]; then
+    echo "kpunlock: refusing to source $cfg (group/world-writable)." >&2
+    return 1
+  fi
   # shellcheck source=/dev/null
-  source "$CONFIG"
-fi
+  source "$cfg"
+}
+
+_safe_source "$CONFIG"
 
 DB="${KP_DB:-}"
 KEYFILE="${KP_KEYFILE:-}"
 
 if [[ -z "$DB" ]]; then
   cat >&2 <<EOF
-No KeePass database configured.
+kpunlock: no KeePass database configured.
 
 Set one of:
   - \$KP_DB env var
@@ -44,24 +57,23 @@ EOF
 fi
 
 if [[ ! -f "$DB" ]]; then
-  echo "Database not found: $DB" >&2
+  echo "kpunlock: database not found: $DB" >&2
   exit 1
 fi
 
 if [[ ! -t 0 ]]; then
-  echo "kpunlock requires a TTY for password entry." >&2
+  echo "kpunlock: requires a TTY for password entry." >&2
   exit 1
 fi
 
-cleanup_on_fail() { rm -f "$CACHE"; unset PW 2>/dev/null || true; }
+cleanup_on_fail() { rm -f "$CACHE"; unset PW; }
 trap cleanup_on_fail ERR INT TERM
 
 IFS= read -rsp "KeePass master password: " PW
 echo
 
-umask 077
 install -m 600 /dev/null "$CACHE"
-printf '%s' "$PW" > "$CACHE"
+printf '%s\n' "$PW" > "$CACHE"
 unset PW
 
 # Verify against the database
@@ -70,7 +82,7 @@ verify_args=()
 
 if ! keepassxc-cli ls "${verify_args[@]}" "$DB" < "$CACHE" > /dev/null 2>&1; then
   rm -f "$CACHE"
-  echo "Wrong password - cache not stored." >&2
+  echo "kpunlock: wrong password - cache not stored." >&2
   exit 1
 fi
 

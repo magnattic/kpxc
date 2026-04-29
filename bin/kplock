@@ -4,11 +4,28 @@
 # Note: shred has no effect on tmpfs (RAM-backed, no physical blocks),
 # so we just unlink - the kernel reclaims the pages.
 
+set -euo pipefail
+
 CONFIG="${KP_CONFIG:-$HOME/.config/kpxc/config}"
-if [[ -f "$CONFIG" ]]; then
+
+_safe_source() {
+  local cfg="$1"
+  [[ -f "$cfg" ]] || return 0
+  if [[ ! -O "$cfg" ]]; then
+    echo "kplock: refusing to source $cfg (not owned by you)." >&2
+    return 1
+  fi
+  local perms
+  perms=$(ls -ld "$cfg" 2>/dev/null | awk '{print $1}')
+  if [[ "${perms:5:1}" == "w" || "${perms:8:1}" == "w" ]]; then
+    echo "kplock: refusing to source $cfg (group/world-writable)." >&2
+    return 1
+  fi
   # shellcheck source=/dev/null
-  source "$CONFIG"
-fi
+  source "$cfg"
+}
+
+_safe_source "$CONFIG"
 
 CACHE="${KP_CACHE:-/dev/shm/$(id -u)-kpxc}"
 

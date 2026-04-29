@@ -12,16 +12,30 @@ set -euo pipefail
 CACHE="${KP_CACHE:-/dev/shm/$(id -u)-kpxc}"
 CONFIG="${KP_CONFIG:-$HOME/.config/kpxc/config}"
 
-if [[ -f "$CONFIG" ]]; then
+_safe_source() {
+  local cfg="$1"
+  [[ -f "$cfg" ]] || return 0
+  if [[ ! -O "$cfg" ]]; then
+    echo "kpget: refusing to source $cfg (not owned by you)." >&2
+    return 1
+  fi
+  local perms
+  perms=$(ls -ld "$cfg" 2>/dev/null | awk '{print $1}')
+  if [[ "${perms:5:1}" == "w" || "${perms:8:1}" == "w" ]]; then
+    echo "kpget: refusing to source $cfg (group/world-writable)." >&2
+    return 1
+  fi
   # shellcheck source=/dev/null
-  source "$CONFIG"
-fi
+  source "$cfg"
+}
+
+_safe_source "$CONFIG"
 
 DB="${KP_DB:-}"
 KEYFILE="${KP_KEYFILE:-}"
 
 if [[ -z "$DB" ]]; then
-  echo "No database configured (set \$KP_DB env var or KP_DB= in config)." >&2
+  echo "kpget: no database configured (set \$KP_DB env var or KP_DB= in config)." >&2
   exit 1
 fi
 
@@ -31,7 +45,7 @@ if [[ $# -lt 1 ]]; then
 fi
 
 if [[ ! -f "$CACHE" ]]; then
-  echo "No cached master password - run 'kpunlock' first." >&2
+  echo "kpget: no cached master password - run 'kpunlock' first." >&2
   exit 1
 fi
 
@@ -40,13 +54,12 @@ if [[ -n "${KP_TTL:-}" ]]; then
   if mtime=$(stat -c %Y "$CACHE" 2>/dev/null); then :
   elif mtime=$(stat -f %m "$CACHE" 2>/dev/null); then :
   else
-    echo "Could not read cache mtime - run 'kpunlock' again." >&2
+    echo "kpget: could not read cache mtime - run 'kpunlock' again." >&2
     exit 1
   fi
   age=$(( $(date +%s) - mtime ))
   if (( age > KP_TTL )); then
-    rm -f "$CACHE"
-    echo "Cache expired (>${KP_TTL}s) - run 'kpunlock' again." >&2
+    echo "kpget: cache expired (>${KP_TTL}s) - run 'kpunlock' again." >&2
     exit 1
   fi
 fi
@@ -61,7 +74,7 @@ fi
 extra_args=()
 [[ -n "$KEYFILE" ]] && extra_args+=(--key-file "$KEYFILE")
 
-if ! keepassxc-cli show -q "${extra_args[@]}" "$@" "$DB" -- "$ENTRY" < "$CACHE"; then
-  echo "keepassxc-cli failed - cache may be stale, try 'kpunlock'." >&2
-  exit 1
-fi
+# Run keepassxc-cli; let its error messages surface directly so the user
+# sees the actual cause (wrong entry path, locked DB, etc.) instead of a
+# generic "cache stale" hint that's often wrong.
+keepassxc-cli show -q "${extra_args[@]}" "$@" "$DB" -- "$ENTRY" < "$CACHE"

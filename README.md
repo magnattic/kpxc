@@ -88,10 +88,11 @@ Set the database path either as an env var or in
 ```sh
 mkdir -p ~/.config/kpxc
 cat > ~/.config/kpxc/config <<'EOF'
-KPXC_DB="/path/to/your.kdbx"
-# KPXC_KEYFILE="/path/to/keyfile"   # if your DB uses one
-# KPXC_TTL=28800                    # optional: expire cache after 8h
+KP_DB="/path/to/your.kdbx"
+# KP_KEYFILE="/path/to/keyfile"   # if your DB uses one
+# KP_TTL=28800                    # optional: expire cache after 8h
 EOF
+chmod 600 ~/.config/kpxc/config   # required - kpxc refuses world/group-writable configs
 ```
 
 ## Use

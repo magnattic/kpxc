@@ -30,10 +30,14 @@ _safe_source() {
     echo "kpxc: refusing to source $cfg (not owned by you)." >&2
     return 1
   fi
-  local perms
-  perms=$(ls -ld "$cfg" 2>/dev/null | awk '{print $1}')
-  if [[ "${perms:5:1}" == "w" || "${perms:8:1}" == "w" ]]; then
-    echo "kpxc: refusing to source $cfg (group/world-writable)." >&2
+  local mode
+  mode=$(stat -c '%a' "$cfg" 2>/dev/null) || mode=$(stat -f '%OLp' "$cfg" 2>/dev/null) || mode=""
+  if [[ -z "$mode" ]]; then
+    echo "kpxc: cannot stat $cfg" >&2
+    return 1
+  fi
+  if (( 8#$mode & 022 )); then
+    echo "kpxc: refusing to source $cfg (mode $mode, group/world-writable)." >&2
     return 1
   fi
   # shellcheck source=/dev/null

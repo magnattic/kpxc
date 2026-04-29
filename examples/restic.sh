@@ -5,7 +5,7 @@
 # Source this in your shell init or a wrapper script.
 
 export RESTIC_REPOSITORY="/path/to/repo"
-export RESTIC_PASSWORD_COMMAND="kpget Backup/restic"
+export RESTIC_PASSWORD_COMMAND="kpxc get Backup/restic"
 
 # Now restic commands will pull the repo password from KeePass:
 #   restic snapshots

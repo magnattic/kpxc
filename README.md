@@ -13,14 +13,14 @@ master password each time and without running a long-lived daemon.
 
 ```sh
 git clone https://github.com/magnattic/kpxc ~/.local/share/kpxc
-ln -s ~/.local/share/kpxc/bin/kp{unlock,get,lock,xc} ~/.local/bin/
+ln -s ~/.local/share/kpxc/bin/kpxc ~/.local/bin/kpxc
 
-export KP_DB=~/Passwords.kdbx
-kpunlock                       # type master password once
-kpget "Email/personal"         # password, no prompt
-kpget "Email/personal" -a User # any keepassxc-cli show option
-kpxc ls /Email                 # any keepassxc-cli subcommand
-kplock                         # clear the cache
+export KPXC_DB=~/Passwords.kdbx
+kpxc unlock                       # type master password once
+kpxc get "Email/personal"         # password, no prompt
+kpxc get "Email/personal" -a User # any keepassxc-cli show option
+kpxc ls /Email                    # any keepassxc-cli subcommand
+kpxc lock                         # clear the cache
 ```
 
 ## Why
@@ -32,22 +32,21 @@ when scripts make many lookups.
 
 Existing solutions don't fit headless setups well:
 
-- **kpsh** - Python daemon, but uses pure-Python Argon2/AES. With modern
-  KeePassXC default KDF settings, the initial unlock can take *minutes*
-  in pure Python (vs. seconds with the official binary).
+- **kpsh / passhole** - pure-Python pykeepass-based daemons. With modern
+  KeePassXC default KDF settings, the initial unlock can take *minutes* in
+  pure Python (vs. seconds with the official binary).
 - **git-credential-keepassxc** - needs the KeePassXC GUI running and
   unlocked, with the browser-extension protocol. Doesn't work headless.
-- **keepasxcli-wrapper** - unmaintained since 2021.
 
-`kpxc` is ~120 lines of bash that:
+`kpxc` is ~200 lines of bash that:
 
-1. Prompts for the master password once (`kpunlock`).
+1. Prompts for the master password once (`kpxc unlock`).
 2. Stores it in `/dev/shm/<uid>-kpxc` with mode `0600`.
-3. Each subsequent `kpget` / `kpxc` reads from the cache and shells out
+3. Each subsequent `kpxc <subcommand>` reads from the cache and shells out
    to `keepassxc-cli`. Fast because it's the official binary.
 
 The master password lives in RAM only (tmpfs is in-memory). It's gone
-after reboot or `kplock`.
+after reboot or `kpxc lock`.
 
 ## Install
 
@@ -75,7 +74,7 @@ sudo ln -s /Applications/KeePassXC.app/Contents/MacOS/keepassxc-cli \
 
 ```sh
 git clone https://github.com/magnattic/kpxc ~/.local/share/kpxc
-ln -s ~/.local/share/kpxc/bin/kp{unlock,get,lock,xc} ~/.local/bin/
+ln -s ~/.local/share/kpxc/bin/kpxc ~/.local/bin/kpxc
 ```
 
 Make sure `~/.local/bin` is in your `$PATH`.
@@ -88,38 +87,45 @@ Set the database path either as an env var or in
 ```sh
 mkdir -p ~/.config/kpxc
 cat > ~/.config/kpxc/config <<'EOF'
-KP_DB="/path/to/your.kdbx"
-# KP_KEYFILE="/path/to/keyfile"   # if your DB uses one
-# KP_TTL=28800                    # optional: expire cache after 8h
+KPXC_DB="/path/to/your.kdbx"
+# KPXC_KEYFILE="/path/to/keyfile"   # if your DB uses one
+# KPXC_TTL=28800                    # optional: expire cache after 8h
 EOF
 chmod 600 ~/.config/kpxc/config   # required - kpxc refuses world/group-writable configs
 ```
 
 ## Use
 
-Two commands cover almost everything:
-
 ```sh
-kpunlock                              # prompts for master password, caches it
-kpget "Email/personal"                # prints the password (hot path for scripts)
-kpget "Email/personal" -a Username    # prints the username
-kpget "Servers/prod" -a URL           # any keepassxc-cli show -a value
-kpget "Email/personal" -s             # show all attributes
-kplock                                # clears the cache (manual lock)
+kpxc unlock                              # prompts for master password, caches it
+kpxc get "Email/personal"                # prints the password (hot path for scripts)
+kpxc get "Email/personal" -a Username    # prints the username
+kpxc get "Servers/prod" -a URL           # any keepassxc-cli show -a value
+kpxc get "Email/personal" -s             # show all attributes
+kpxc lock                                # clears the cache (manual lock)
 ```
 
-For everything beyond `show`, use the generic wrapper:
+For everything beyond `get`, kpxc forwards any `keepassxc-cli` subcommand
+with the cached password injected:
 
 ```sh
 kpxc ls /Email                        # list entries in a group
 kpxc search github                    # full-text search
 kpxc db-info                          # database metadata
-kpxc show -a Password Servers/prod    # equivalent to kpget Servers/prod
+kpxc add -g -L 24 -u alice Email/foo  # add entry with a generated password
+kpxc rm Email/old                     # remove an entry
+kpxc mv Email/foo Archive/foo         # move an entry
+kpxc generate -L 32                   # standalone password generator (no DB needed)
 ```
 
-`kpxc` forwards any `keepassxc-cli` subcommand and injects the cached
-password automatically. `kpget` is just a shortcut for the most common
-case (printing one attribute) and stays terse in config files.
+A few subcommands are blocked because wrapping them would corrupt data:
+
+- `kpxc db-create / import / open / close / merge` - non-standard argument
+  shape; injecting the database would target the wrong file.
+- `kpxc add -p / edit -p / db-edit -p / db-edit --set-password` - these
+  prompt for an additional password on stdin, but the cache holds only
+  the master password. Use `-g` for a generated entry password, or invoke
+  `keepassxc-cli` directly.
 
 ## Integrate with other tools
 
@@ -127,14 +133,14 @@ case (printing one attribute) and stays terse in config files.
 
 ```toml
 # ~/.config/himalaya/config.toml, tested with himalaya v1.2+
-backend.auth.cmd = "kpget Email/personal"
+backend.auth.cmd = "kpxc get Email/personal"
 ```
 
 ### mbsync / isync
 
 ```
 # ~/.mbsyncrc
-PassCmd "+kpget 'Email/personal'"
+PassCmd "+kpxc get 'Email/personal'"
 ```
 
 The `+` prefix tells mbsync to suppress logging the command.
@@ -142,13 +148,13 @@ The `+` prefix tells mbsync to suppress logging the command.
 ### mutt
 
 ```
-set imap_pass = "`kpget Email/personal`"
+set imap_pass = "`kpxc get Email/personal`"
 ```
 
 ### restic
 
 ```sh
-export RESTIC_PASSWORD_COMMAND="kpget Backup/restic-repo"
+export RESTIC_PASSWORD_COMMAND="kpxc get Backup/restic-repo"
 restic snapshots
 ```
 
@@ -163,7 +169,9 @@ See [`examples/`](examples/) for full configs.
 - The cache file is created atomically with `install -m 600 /dev/null`,
   so there's no readable window even before `chmod`.
 - `set -euo pipefail` plus an `ERR/INT/TERM` trap ensure the cache is
-  removed if `kpunlock` is interrupted mid-write.
+  removed if `kpxc unlock` is interrupted mid-write.
+- Config files are not sourced unless owned by the current user and not
+  group/world-writable. Prevents code injection via a writable config.
 - Entry paths are passed to `keepassxc-cli show` after `--`, so an entry
   name starting with `-` cannot be misinterpreted as an option.
 
@@ -194,8 +202,13 @@ still get fast lookups.
 
 ## Alternatives
 
-- [kpsh](https://git.goral.net.pl/keepass-shell.git): daemon, pure-Python
-  pykeepass. Good if your DB uses moderate KDF rounds.
+- [passhole](https://github.com/Evidlo/passhole): pure-Python CLI password
+  manager, pass-style. Has a richer interactive interface (add, type,
+  generate as first-class commands, dmenu integration) and built-in TOTP.
+  Best fit for default-KDF databases and interactive desktop use; the
+  pure-Python KDF makes it slow on high-rounds databases.
+- [kpsh](https://git.goral.net.pl/keepass-shell.git): pure-Python daemon,
+  same KDF caveat as passhole.
 - [git-credential-keepassxc](https://github.com/Frederick888/git-credential-keepassxc):
   talks to a running KeePassXC GUI via the browser-extension protocol.
   Best if you have a GUI session anyway.

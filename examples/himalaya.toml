@@ -15,4 +15,4 @@ backend.port = 993
 backend.encryption.type = "tls"
 backend.login = "you@example.com"
 backend.auth.type = "password"
-backend.auth.cmd = "kpget Email/personal"
+backend.auth.cmd = "kpxc get Email/personal"

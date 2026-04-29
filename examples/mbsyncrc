@@ -6,7 +6,7 @@
 IMAPAccount personal
 Host imap.example.com
 User you@example.com
-PassCmd "+kpget 'Email/personal'"
+PassCmd "+kpxc get 'Email/personal'"
 TLSType IMAPS
 
 IMAPStore personal-remote

@@ -2,8 +2,8 @@
 # Integration tests for kpxc.
 #
 # Builds an ephemeral test database with low KDF rounds, primes the cache
-# directly, and exercises kpget/kpxc/kplock against it. Exits non-zero on
-# any failure.
+# directly, and exercises the kpxc subcommands against it. Exits non-zero
+# on any failure.
 #
 # Run from anywhere: bash tests/test.sh
 
@@ -24,9 +24,9 @@ DB="$WORKDIR/test.kdbx"
 CACHE="$WORKDIR/cache"
 MASTER_PW="kpxc-testpw"
 
-export KP_DB="$DB"
-export KP_CACHE="$CACHE"
-export KP_CONFIG="$WORKDIR/no-such-config"
+export KPXC_DB="$DB"
+export KPXC_CACHE="$CACHE"
+export KPXC_RC="$WORKDIR/no-such-rc"
 export PATH="$BIN:$PATH"
 
 build_fixture() {
@@ -46,7 +46,7 @@ build_fixture() {
 
 prime_cache() {
   install -m 600 /dev/null "$CACHE"
-  printf '%s' "$MASTER_PW" > "$CACHE"
+  printf '%s\n' "$MASTER_PW" > "$CACHE"
 }
 
 clear_cache() { rm -f "$CACHE"; }
@@ -88,29 +88,29 @@ check_fails() {
   fi
 }
 
-echo "Building fixture (this takes ~1s for the low-rounds KDF)..."
+echo "Building fixture..."
 build_fixture
 
 echo
-echo "## kpget without cache"
+echo "## kpxc get without cache"
 clear_cache
-check_fails "kpget exits non-zero without cache" kpget Email/personal
+check_fails "kpxc get exits non-zero without cache" kpxc get Email/personal
 check_fails "kpxc show exits non-zero without cache" kpxc show -a Password Email/personal
 
 echo
-echo "## kpget with cache"
+echo "## kpxc get with cache"
 prime_cache
-check "kpget default returns Password" "secret123" "$(kpget Email/personal)"
-check "kpget -a Username returns user" "alice" "$(kpget Email/personal -a Username)"
-check "kpget -a URL returns URL" "https://prod.example.com" "$(kpget Servers/prod -a URL)"
-check "kpget Backup/restic returns Password" "resticpw" "$(kpget Backup/restic)"
+check "kpxc get default returns Password" "secret123" "$(kpxc get Email/personal)"
+check "kpxc get -a Username" "alice" "$(kpxc get Email/personal -a Username)"
+check "kpxc get -a URL" "https://prod.example.com" "$(kpxc get Servers/prod -a URL)"
+check "kpxc get Backup/restic returns Password" "resticpw" "$(kpxc get Backup/restic)"
 
 echo
-echo "## kpxc generic wrapper"
+echo "## kpxc generic wrapper (read-only subcommands)"
 check_contains "kpxc ls /Email lists personal" "personal" "$(kpxc ls /Email)"
 check_contains "kpxc search prod finds entry" "prod" "$(kpxc search prod)"
 check_contains "kpxc db-info shows cipher" "Cipher:" "$(kpxc db-info)"
-check "kpxc show -a Password matches kpget" "secret123" \
+check "kpxc show -a Password matches kpxc get" "secret123" \
   "$(kpxc show -q -a Password -- Email/personal | tr -d '\r')"
 
 echo
@@ -137,8 +137,6 @@ check_contains "kpxc add (no -p) is allowed and creates entry" "Successfully" \
 
 echo
 echo "## kpxc subcommand --help passthrough"
-# keepassxc-cli exits non-zero on --help (its arg parser flags missing
-# positionals before checking the help flag), so allow non-zero here.
 help_out="$(kpxc show --help 2>&1 || true)"
 check_contains "kpxc show --help renders help (no DB injection)" \
   "Show an entry" "$help_out"
@@ -146,41 +144,52 @@ help_out="$(kpxc ls -h 2>&1 || true)"
 check_contains "kpxc ls -h renders help" "List database" "$help_out"
 
 echo
+echo "## kpxc top-level help and version"
+help_out="$(kpxc --help 2>&1 || true)"
+check_contains "kpxc --help renders top-level help" "Usage" "$help_out"
+ver_out="$(kpxc --version 2>&1 || true)"
+check_contains "kpxc --version returns a version string" "." "$ver_out"
+
+echo
 echo "## config permission check (security)"
-PERM_CONFIG="$WORKDIR/perm-test-config"
-echo 'KP_DB='"$DB" > "$PERM_CONFIG"
-chmod 644 "$PERM_CONFIG"   # group/world-readable but world-writable is the threat
+PERM_CONFIG="$WORKDIR/perm-test-rc"
+echo 'KPXC_DB='"$DB" > "$PERM_CONFIG"
 chmod 666 "$PERM_CONFIG"
-check_fails "kpget refuses world-writable config" \
-  env KP_CONFIG="$PERM_CONFIG" kpget Email/personal
-check_fails "kpxc refuses world-writable config" \
-  env KP_CONFIG="$PERM_CONFIG" kpxc ls /
+check_fails "kpxc get refuses world-writable config" \
+  env KPXC_RC="$PERM_CONFIG" kpxc get Email/personal
+check_fails "kpxc ls refuses world-writable config" \
+  env KPXC_RC="$PERM_CONFIG" kpxc ls /
 chmod 600 "$PERM_CONFIG"
-check "kpget accepts 0600 config" "secret123" \
-  "$(env KP_CONFIG="$PERM_CONFIG" kpget Email/personal)"
+check "kpxc get accepts 0600 config" "secret123" \
+  "$(env KPXC_RC="$PERM_CONFIG" kpxc get Email/personal)"
 
 echo
 echo "## TTL expiry"
 prime_cache
 sleep 1
-check_fails "kpget with KP_TTL=0 expires" env KP_TTL=0 kpget Email/personal
+check_fails "kpxc get with KPXC_TTL=0 expires" env KPXC_TTL=0 kpxc get Email/personal
 prime_cache
 sleep 1
-check_fails "kpxc with KP_TTL=0 expires" env KP_TTL=0 kpxc ls /Email
+check_fails "kpxc ls with KPXC_TTL=0 expires" env KPXC_TTL=0 kpxc ls /Email
 
 echo
-echo "## kplock"
+echo "## kpxc lock"
 prime_cache
-kplock >/dev/null
+kpxc lock >/dev/null
 if [[ ! -e "$CACHE" ]]; then
-  printf '  ok   kplock removes cache file\n'
+  printf '  ok   kpxc lock removes cache file\n'
   PASS=$((PASS + 1))
 else
-  printf '  FAIL kplock did not remove cache file\n'
+  printf '  FAIL kpxc lock did not remove cache file\n'
   FAIL=$((FAIL + 1))
 fi
-output="$(kplock)"
-check "kplock on empty cache prints (no cache)" "(no cache)" "$output"
+output="$(kpxc lock)"
+check "kpxc lock on empty cache prints (no cache)" "(no cache)" "$output"
+
+echo
+echo "## kpxc usage"
+usage_out="$(kpxc 2>&1 || true)"
+check_contains "kpxc with no args prints usage" "Usage" "$usage_out"
 
 echo
 echo "## Results"

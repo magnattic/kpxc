@@ -9,19 +9,19 @@
 
 set -euo pipefail
 
-CACHE="${KPCACHE_FILE:-/dev/shm/$(id -u)-kpcache}"
-CONFIG="${KPCACHE_CONFIG:-$HOME/.config/kpcache/config}"
+CACHE="${KP_CACHE:-/dev/shm/$(id -u)-kpxc}"
+CONFIG="${KP_CONFIG:-$HOME/.config/kpxc/config}"
 
 if [[ -f "$CONFIG" ]]; then
   # shellcheck source=/dev/null
   source "$CONFIG"
 fi
 
-DB="${KP_DB:-${KPCACHE_DB:-}}"
-KEYFILE="${KP_KEYFILE:-${KPCACHE_KEYFILE:-}}"
+DB="${KP_DB:-}"
+KEYFILE="${KP_KEYFILE:-}"
 
 if [[ -z "$DB" ]]; then
-  echo "❌ No database configured (set \$KP_DB or KPCACHE_DB in config)." >&2
+  echo "No database configured (set \$KP_DB env var or KP_DB= in config)." >&2
   exit 1
 fi
 
@@ -31,22 +31,22 @@ if [[ $# -lt 1 ]]; then
 fi
 
 if [[ ! -f "$CACHE" ]]; then
-  echo "❌ No cached master password - run 'kpunlock' first." >&2
+  echo "No cached master password - run 'kpunlock' first." >&2
   exit 1
 fi
 
-# Optional TTL check (portable mtime - GNU stat -c, BSD/macOS stat -f)
-if [[ -n "${KPCACHE_TTL:-}" ]]; then
+# Optional TTL check (portable mtime: GNU stat -c, BSD/macOS stat -f).
+if [[ -n "${KP_TTL:-}" ]]; then
   if mtime=$(stat -c %Y "$CACHE" 2>/dev/null); then :
   elif mtime=$(stat -f %m "$CACHE" 2>/dev/null); then :
   else
-    echo "❌ Could not read cache mtime - run 'kpunlock' again." >&2
+    echo "Could not read cache mtime - run 'kpunlock' again." >&2
     exit 1
   fi
   age=$(( $(date +%s) - mtime ))
-  if (( age > KPCACHE_TTL )); then
+  if (( age > KP_TTL )); then
     rm -f "$CACHE"
-    echo "❌ Cache expired (>${KPCACHE_TTL}s) - run 'kpunlock' again." >&2
+    echo "Cache expired (>${KP_TTL}s) - run 'kpunlock' again." >&2
     exit 1
   fi
 fi
@@ -62,6 +62,6 @@ extra_args=()
 [[ -n "$KEYFILE" ]] && extra_args+=(--key-file "$KEYFILE")
 
 if ! keepassxc-cli show -q "${extra_args[@]}" "$@" "$DB" -- "$ENTRY" < "$CACHE"; then
-  echo "❌ keepassxc-cli failed - cache may be stale, try 'kpunlock'." >&2
+  echo "keepassxc-cli failed - cache may be stale, try 'kpunlock'." >&2
   exit 1
 fi

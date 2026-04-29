@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+# kpxc - generic wrapper around keepassxc-cli using the cached master password.
+#
+# Usage:
+#   kpxc <subcommand> [args...]
+#
+# Streams the cached master password from /dev/shm/<uid>-kpxc on stdin,
+# so subcommands that need an unlocked database don't reprompt.
+#
+# Examples:
+#   kpxc ls /Email
+#   kpxc search foo
+#   kpxc show -a Password Servers/prod
+#   kpxc db-info
+#
+# Run 'kpunlock' first to populate the cache. For the show -a Password
+# hot path used in scripts, prefer 'kpget' (shorter syntax).
+#
+# Configuration: see kpunlock(1).
+
+set -euo pipefail
+
+CACHE="${KP_CACHE:-/dev/shm/$(id -u)-kpxc}"
+CONFIG="${KP_CONFIG:-$HOME/.config/kpxc/config}"
+
+if [[ -f "$CONFIG" ]]; then
+  # shellcheck source=/dev/null
+  source "$CONFIG"
+fi
+
+DB="${KP_DB:-}"
+KEYFILE="${KP_KEYFILE:-}"
+
+if [[ $# -lt 1 ]]; then
+  cat >&2 <<EOF
+Usage: kpxc <subcommand> [args...]
+
+Wraps keepassxc-cli with the cached master password from $CACHE.
+Run 'kpunlock' first.
+
+Examples:
+  kpxc ls /Email
+  kpxc search foo
+  kpxc show -a Password Servers/prod
+  kpxc db-info
+EOF
+  exit 2
+fi
+
+SUBCMD="$1"; shift
+
+# Subcommands that don't need an unlocked database, pass through directly.
+case "$SUBCMD" in
+  estimate|generate|diceware|--help|-h|--version|-v)
+    exec keepassxc-cli "$SUBCMD" "$@"
+    ;;
+esac
+
+if [[ -z "$DB" ]]; then
+  echo "No database configured (set \$KP_DB env var or KP_DB= in config)." >&2
+  exit 1
+fi
+
+if [[ ! -f "$CACHE" ]]; then
+  echo "No cached master password - run 'kpunlock' first." >&2
+  exit 1
+fi
+
+# Optional TTL check (portable mtime: GNU stat -c, BSD/macOS stat -f).
+if [[ -n "${KP_TTL:-}" ]]; then
+  if mtime=$(stat -c %Y "$CACHE" 2>/dev/null); then :
+  elif mtime=$(stat -f %m "$CACHE" 2>/dev/null); then :
+  else
+    echo "Could not read cache mtime - run 'kpunlock' again." >&2
+    exit 1
+  fi
+  age=$(( $(date +%s) - mtime ))
+  if (( age > KP_TTL )); then
+    rm -f "$CACHE"
+    echo "Cache expired (>${KP_TTL}s) - run 'kpunlock' again." >&2
+    exit 1
+  fi
+fi
+
+extra_args=()
+[[ -n "$KEYFILE" ]] && extra_args+=(--key-file "$KEYFILE")
+
+# Inject DB right after the subcommand. keepassxc-cli (Qt CommandLineParser)
+# accepts options in any position, so this works for show/ls/search/db-info/etc.
+exec keepassxc-cli "$SUBCMD" "${extra_args[@]}" "$DB" "$@" < "$CACHE"

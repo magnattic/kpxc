@@ -4,20 +4,20 @@
 # Reads the master password from a TTY prompt, verifies it against the
 # database via keepassxc-cli, then stores it at:
 #
-#   /dev/shm/$(id -u)-kpcache
+#   /dev/shm/$(id -u)-kpxc
 #
 # with mode 0600. The cache lives until reboot or `kplock`. Optionally
-# expires after $KPCACHE_TTL seconds (checked at read-time by `kpget`).
+# expires after $KP_TTL seconds (checked at read-time by `kpget`/`kpxc`).
 #
 # Configuration (in order of precedence):
 #   1. $KP_DB env var
-#   2. $KPCACHE_DB in ~/.config/kpcache/config
+#   2. KP_DB= in ~/.config/kpxc/config
 #   3. error if neither is set
 
 set -euo pipefail
 
-CACHE="${KPCACHE_FILE:-/dev/shm/$(id -u)-kpcache}"
-CONFIG="${KPCACHE_CONFIG:-$HOME/.config/kpcache/config}"
+CACHE="${KP_CACHE:-/dev/shm/$(id -u)-kpxc}"
+CONFIG="${KP_CONFIG:-$HOME/.config/kpxc/config}"
 
 # Load config if present
 if [[ -f "$CONFIG" ]]; then
@@ -25,31 +25,31 @@ if [[ -f "$CONFIG" ]]; then
   source "$CONFIG"
 fi
 
-DB="${KP_DB:-${KPCACHE_DB:-}}"
-KEYFILE="${KP_KEYFILE:-${KPCACHE_KEYFILE:-}}"
+DB="${KP_DB:-}"
+KEYFILE="${KP_KEYFILE:-}"
 
 if [[ -z "$DB" ]]; then
   cat >&2 <<EOF
-❌ No KeePass database configured.
+No KeePass database configured.
 
 Set one of:
   - \$KP_DB env var
-  - KPCACHE_DB in $CONFIG
+  - KP_DB= in $CONFIG
 
 Example config:
-  KPCACHE_DB="/path/to/db.kdbx"
-  KPCACHE_KEYFILE="/path/to/keyfile"   # optional
+  KP_DB="/path/to/db.kdbx"
+  KP_KEYFILE="/path/to/keyfile"   # optional
 EOF
   exit 1
 fi
 
 if [[ ! -f "$DB" ]]; then
-  echo "❌ Database not found: $DB" >&2
+  echo "Database not found: $DB" >&2
   exit 1
 fi
 
 if [[ ! -t 0 ]]; then
-  echo "❌ kpunlock requires a TTY for password entry." >&2
+  echo "kpunlock requires a TTY for password entry." >&2
   exit 1
 fi
 
@@ -70,10 +70,10 @@ verify_args=()
 
 if ! keepassxc-cli ls "${verify_args[@]}" "$DB" < "$CACHE" > /dev/null 2>&1; then
   rm -f "$CACHE"
-  echo "❌ Wrong password - cache not stored." >&2
+  echo "Wrong password - cache not stored." >&2
   exit 1
 fi
 
 trap - ERR INT TERM
-echo "✓ Master password cached at $CACHE"
-echo "  Lives until reboot or 'kplock'${KPCACHE_TTL:+ (or after ${KPCACHE_TTL}s - checked by kpget)}"
+echo "Master password cached at $CACHE"
+echo "Lives until reboot or 'kplock'${KP_TTL:+ (or after ${KP_TTL}s - checked at read time)}"

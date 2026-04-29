@@ -4,17 +4,17 @@
 # Note: shred has no effect on tmpfs (RAM-backed, no physical blocks),
 # so we just unlink - the kernel reclaims the pages.
 
-CONFIG="${KPCACHE_CONFIG:-$HOME/.config/kpcache/config}"
+CONFIG="${KP_CONFIG:-$HOME/.config/kpxc/config}"
 if [[ -f "$CONFIG" ]]; then
   # shellcheck source=/dev/null
   source "$CONFIG"
 fi
 
-CACHE="${KPCACHE_FILE:-/dev/shm/$(id -u)-kpcache}"
+CACHE="${KP_CACHE:-/dev/shm/$(id -u)-kpxc}"
 
 if [[ -f "$CACHE" ]]; then
   rm -f "$CACHE"
-  echo "✓ Cache cleared"
+  echo "Cache cleared"
 else
   echo "(no cache)"
 fi

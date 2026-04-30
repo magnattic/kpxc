@@ -144,7 +144,7 @@ Cached entries:
 
 Saved scope (/home/you/.config/kpxc/scope):
   Email/personal
-  Email/personal:Username
+  Email/personal	Username    # path<TAB>field
   Backup/restic
 ```
 
@@ -348,6 +348,21 @@ still get fast lookups.
   Best if you have a GUI session anyway.
 - [pass](https://www.passwordstore.org/): drop KeePass, use GPG-encrypted
   files with `gpg-agent` for caching. Larger migration.
+
+## Upgrading from v0.4.1
+
+The scope file's in-line separator changed from `:` to TAB so that entry
+titles can themselves contain `:` (KeePass allows it). On first
+`kpxc unlock` after the upgrade, kpxc detects likely legacy lines and
+prints a one-time warning pointing you at the fix. To migrate:
+
+- Easy: `kpxc unlock --interactive` to re-pick the scope (writes the file
+  in the new format), or
+- Manual: edit `~/.config/kpxc/scope` and replace the `:` before each field
+  name with a literal TAB.
+
+Default-field entries (`Email/personal` with no field suffix) carry over
+unchanged.
 
 ## License
 

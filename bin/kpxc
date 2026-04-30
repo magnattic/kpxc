@@ -182,6 +182,34 @@ _load_scope_file() {
   if (( ${#lines[@]} == 0 )); then
     return 1
   fi
+
+  # Migration warning: v0.4.1 used ':' to separate <path> from <field>;
+  # v0.4.2+ uses TAB so that entry titles can contain ':'. Heuristic:
+  # a line with no TAB whose tail after the last ':' looks like a
+  # capitalized field name (or comma-list of them). Real entry titles
+  # with ':' are common enough that we only warn, never reject.
+  local legacy=()
+  local tail
+  for line in "${lines[@]}"; do
+    [[ "$line" == *$'\t'* ]] && continue
+    [[ "$line" != *:* ]] && continue
+    tail="${line##*:}"
+    if [[ "$tail" =~ ^[A-Z][a-zA-Z0-9_]*([[:space:]]*,[[:space:]]*[A-Z][a-zA-Z0-9_]*)*$ ]]; then
+      legacy+=("$line")
+    fi
+  done
+  if (( ${#legacy[@]} > 0 )); then
+    {
+      echo "kpxc: warning - $SCOPE_FILE may contain legacy v0.4.1 ':' separator."
+      echo "  Since v0.4.2 the path/field separator is a literal TAB so that"
+      echo "  entry titles can contain ':'. Detected lines:"
+      printf '    %s\n' "${legacy[@]}"
+      echo "  If these are real entries with ':' in the title, ignore this."
+      echo "  Otherwise: 'kpxc unlock --interactive' regenerates the file,"
+      echo "  or edit '$SCOPE_FILE' and replace the ':' with a TAB before the field."
+    } >&2
+  fi
+
   printf '%s\n' "${lines[@]}"
   return 0
 }
@@ -558,7 +586,7 @@ _cmd_scope() {
     echo
     echo "Saved scope ($SCOPE_FILE):"
     local saved
-    saved=$(_load_scope_file 2>/dev/null) || return 0
+    saved=$(_load_scope_file) || return 0
     while IFS= read -r line; do
       [[ -z "$line" ]] && continue
       printf '  %s\n' "$line"
@@ -623,7 +651,7 @@ _cmd_get() {
 _usage() {
   cat >&2 <<'EOF'
 Usage:
-  kpxc unlock [--master] [--interactive] [<scope-spec>...]
+  kpxc unlock [--master] [-i|--interactive] [<entry-path>...]
                                 # scope mode by default. First unlock
                                 # prompts you to pick which entries.
   kpxc lock                     # clear all caches
@@ -632,14 +660,18 @@ Usage:
   kpxc scope                    # show what's cached
   kpxc <subcmd> [args...]       # forward to keepassxc-cli (master mode only)
 
-Scope-spec syntax:
-  Email/personal                  default field (Password)
-  Email/personal:Username         specific field
-  Email/personal:Password,URL     multiple fields on one entry
+Scope on the CLI:
+  One entry path per arg; the cached field is always Password.
+  Entry names with spaces need quoting:
+    kpxc unlock 'Email/My Personal Account'
+
+For non-Password fields or multi-field entries, use the picker (-i)
+or edit the scope file directly. See the file's auto-generated header
+for the TAB-separated syntax.
 
 Examples:
   kpxc unlock                                # picker on first run, then saved
-  kpxc unlock --interactive                  # re-pick scope
+  kpxc unlock -i                             # re-pick scope
   kpxc unlock Email/personal Backup/restic   # one-off scope (not saved)
   kpxc unlock --master                       # cache master password
   kpxc get Email/personal

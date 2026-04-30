@@ -327,6 +327,42 @@ check_contains "scope file does not echo comment lines" "Saved scope" "$out"
 }
 
 echo
+echo "## scope file: legacy v0.4.1 ':' syntax migration warning"
+LEGACY="$WORKDIR/scope-legacy"
+{
+  printf '%s\n' 'Email/personal:Username'
+  printf '%s\n' 'Backup/restic:Password,URL'
+} > "$LEGACY"
+chmod 600 "$LEGACY"
+err_out="$(env KPXC_SCOPE="$LEGACY" kpxc scope 2>&1 || true)"
+check_contains "legacy ':' syntax triggers migration warning" "legacy v0.4.1" "$err_out"
+check_contains "warning lists offending line" "Email/personal:Username" "$err_out"
+# Real entry titles with ':' should NOT trigger the warning.
+NONLEGACY="$WORKDIR/scope-nonlegacy"
+printf '%s\t%s\n' 'Notes/Has:Colon' 'Password' > "$NONLEGACY"
+chmod 600 "$NONLEGACY"
+err_out="$(env KPXC_SCOPE="$NONLEGACY" kpxc scope 2>&1 || true)"
+[[ "$err_out" != *"legacy v0.4.1"* ]] && {
+  printf '  ok   real entry with TAB+colon does not falsely trigger warning\n'; PASS=$((PASS + 1))
+} || {
+  printf '  FAIL warning fired on a non-legacy entry\n'; FAIL=$((FAIL + 1))
+}
+
+echo
+echo "## kpxc lock: refuses to remove cache dir with stray files"
+rm -rf "$CACHE_DIR"
+install -d -m 0700 "$CACHE_DIR"
+touch "$CACHE_DIR/some-other-file"
+err_out="$(kpxc lock 2>&1 || true)"
+check_contains "lock refuses dir with stray files" "refusing to remove" "$err_out"
+[[ -d "$CACHE_DIR" && -f "$CACHE_DIR/some-other-file" ]] && {
+  printf '  ok   lock left stray file untouched\n'; PASS=$((PASS + 1))
+} || {
+  printf '  FAIL lock removed stray file or its directory\n'; FAIL=$((FAIL + 1))
+}
+rm -rf "$CACHE_DIR"
+
+echo
 echo "## unlock requires TTY"
 clear_cache
 err_out="$(echo somepw | kpxc unlock 2>&1 || true)"

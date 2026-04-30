@@ -24,6 +24,7 @@ MASTER_PW="kpxc-testpw"
 export KPXC_DB="$DB"
 export KPXC_CACHE="$CACHE_DIR"
 export KPXC_RC="$WORKDIR/no-such-rc"
+export KPXC_SCOPE="$WORKDIR/no-such-scope"
 export PATH="$BIN:$PATH"
 
 build_fixture() {
@@ -255,6 +256,25 @@ touch "$CACHE_DIR"   # simulate v0.3.x file at the location now used as a dir
 err_out="$(kpxc scope 2>&1 || true)"
 check_contains "kpxc detects legacy cache file and aborts" "legacy v0.3.x cache file" "$err_out"
 rm -f "$CACHE_DIR"
+
+echo
+echo "## scope file load and permission check"
+SCOPE_PATH="$WORKDIR/scope-test"
+echo 'Email/personal' > "$SCOPE_PATH"
+chmod 666 "$SCOPE_PATH"
+prime_scoped_cache "Email/personal:Password=secret123"
+err_out="$(env KPXC_SCOPE="$SCOPE_PATH" kpxc scope 2>&1 || true)"
+check_contains "scope command refuses world-writable scope file" "group/world-writable" "$err_out"
+chmod 600 "$SCOPE_PATH"
+out="$(env KPXC_SCOPE="$SCOPE_PATH" kpxc scope 2>&1 || true)"
+check_contains "scope command shows scope file when 0600" "Saved scope" "$out"
+check_contains "scope command lists entry from scope file" "Email/personal" "$out"
+
+echo
+echo "## unlock requires TTY"
+clear_cache
+err_out="$(echo somepw | kpxc unlock 2>&1 || true)"
+check_contains "unlock without TTY produces clear error" "requires a TTY" "$err_out"
 
 echo
 echo "## Results"

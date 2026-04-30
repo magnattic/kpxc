@@ -98,20 +98,22 @@ The saved scope file at `~/.config/kpxc/scope` looks like:
 ```
 # kpxc scope file - which entries 'kpxc unlock' should cache.
 #
-# One line per scope entry:
-#   <path>                         cache the Password field
-#   <path>:<field>                 cache one specific field
-#   <path>:<field1>,<field2>,...   cache multiple fields
+# One line per scope entry. Field list is TAB-separated from the path
+# (so entry titles can contain ':' or spaces):
+#   <path>                  cache the Password field
+#   <path>\t<field>         cache one specific field
+#   <path>\t<f1>,<f2>,...   cache multiple fields
 #
 # Special: a single line `all` puts kpxc in master mode.
 
 Email/personal
-Email/personal:Username
+Email/personal	Username
 Backup/restic
 ```
 
 Edit by hand to add fields (Username, URL, Notes, custom attributes) or
-new entries. Or rerun `kpxc unlock --interactive` to regenerate.
+new entries -- the separator between path and field list is a literal
+TAB character. Or rerun `kpxc unlock --interactive` to regenerate.
 
 ### Master mode
 

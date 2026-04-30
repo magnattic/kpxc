@@ -23,10 +23,15 @@
 #   kpxc <keepassxc-subcmd> [args...]            forward to keepassxc-cli
 #                                                (requires master mode)
 #
-# Scope-spec syntax (CLI and scope file):
-#   Email/personal                  default field (Password)
-#   Email/personal:Username         specific field
-#   Email/personal:Password,URL     multiple fields on one entry
+# Scope spec:
+#   - On the CLI, one entry path per argument. Field is always Password.
+#       kpxc unlock Email/personal "Backup/My Server"
+#   - In the scope file, one entry per line. Optional TAB-separated
+#     field list (default Password). Comments with '#'.
+#       Email/personal
+#       Email/personal	Username           # TAB before the field list
+#       Email/personal	Password,URL       # multiple fields
+#       all                                  # master mode
 #
 # Configuration:
 #   $KPXC_DB        path to .kdbx (required)
@@ -77,12 +82,23 @@ _safe_source "$CONFIG"
 DB="${KPXC_DB:-}"
 KEYFILE="${KPXC_KEYFILE:-}"
 
-# Migration guard: v0.3.x used a single file at /dev/shm/<uid>-kpxc. If we
-# find such a file at the path our directory should occupy, refuse rather
-# than silently shred user state.
-if [[ -f "$CACHE_DIR" ]]; then
-  echo "kpxc: legacy v0.3.x cache file at $CACHE_DIR conflicts with the new" >&2
-  echo "  cache-directory layout. Remove it: rm '$CACHE_DIR'" >&2
+# Cache-dir sanity check.
+# - If $CACHE_DIR exists and is not a regular directory, refuse:
+#   - a regular file: legacy v0.3.x layout, point at migration.
+#   - a symlink: would let an attacker on a shared /dev/shm redirect
+#     our writes (mild but real on multi-user hosts).
+#   - anything else: weird state, refuse.
+if [[ -L "$CACHE_DIR" ]]; then
+  echo "kpxc: refusing to use $CACHE_DIR (it is a symlink). Remove it first." >&2
+  exit 1
+fi
+if [[ -e "$CACHE_DIR" && ! -d "$CACHE_DIR" ]]; then
+  if [[ -f "$CACHE_DIR" ]]; then
+    echo "kpxc: legacy v0.3.x cache file at $CACHE_DIR conflicts with the new" >&2
+    echo "  cache-directory layout. Remove it: rm '$CACHE_DIR'" >&2
+  else
+    echo "kpxc: $CACHE_DIR exists and is not a directory; refusing to proceed." >&2
+  fi
   exit 1
 fi
 
@@ -115,21 +131,34 @@ _check_ttl_file() {
   fi
 }
 
-# Parse a scope spec ("Email/x Email/y:Username,URL") into TAB-separated
-# (path, field) pairs on stdout.
+# Read scope entries from stdin (one per line, '#' comments allowed) and
+# emit TAB-separated (path, field) pairs on stdout.
+#
+# Within a line: the first TAB separates path from a comma-separated
+# field list. No TAB on the line means the field is Password.
+#
+# Whitespace in the path itself is preserved (KeePass entry titles can
+# contain spaces). Only TAB acts as the path/field separator.
 _parse_scope() {
-  local spec="$*"
-  local token
-  for token in $spec; do
-    local path field_list
-    if [[ "$token" == *:* ]]; then
-      path="${token%%:*}"
-      field_list="${token#*:}"
+  local line path field_list field
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%%#*}"
+    # Trim trailing whitespace
+    line="${line%"${line##*[![:space:]]}"}"
+    # Trim leading whitespace
+    line="${line#"${line%%[![:space:]]*}"}"
+    [[ -z "$line" ]] && continue
+    if [[ "$line" == *$'\t'* ]]; then
+      path="${line%%$'\t'*}"
+      field_list="${line#*$'\t'}"
+      # Trim whitespace around the field list
+      field_list="${field_list#"${field_list%%[![:space:]]*}"}"
+      field_list="${field_list%"${field_list##*[![:space:]]}"}"
+      [[ -z "$field_list" ]] && field_list="Password"
     else
-      path="$token"
+      path="$line"
       field_list="Password"
     fi
-    local field
     IFS=, read -ra fields <<< "$field_list"
     for field in "${fields[@]}"; do
       printf '%s\t%s\n' "$path" "$field"
@@ -158,7 +187,7 @@ _load_scope_file() {
 }
 
 _save_scope_file() {
-  local scope="$1"
+  # Args: each is one scope-file line (no embedded newlines).
   local dir
   dir=$(dirname -- "$SCOPE_FILE")
   install -d -m 0700 "$dir"
@@ -168,9 +197,9 @@ _save_scope_file() {
 # kpxc scope file - which entries 'kpxc unlock' should cache.
 #
 # One line per scope entry:
-#   <path>                         cache the Password field
-#   <path>:<field>                 cache one specific field
-#   <path>:<field1>,<field2>,...   cache multiple fields
+#   <path>                  cache the Password field
+#   <path>\t<field>         cache one specific field (TAB-separated)
+#   <path>\t<field1>,<f2>   cache multiple fields
 #
 # Special: a single line `all` puts kpxc in master mode (full
 # keepassxc-cli access; the master password is cached). Use with care.
@@ -178,22 +207,22 @@ _save_scope_file() {
 # Edit by hand, or regenerate with: kpxc unlock --interactive
 
 EOF
-    local IFS_orig="$IFS"
-    IFS=$'\n'
-    for line in $scope; do
-      printf '%s\n' "$line"
+    local entry
+    for entry in "$@"; do
+      printf '%s\n' "$entry"
     done
-    IFS="$IFS_orig"
   } > "$SCOPE_FILE"
 }
 
 # List all entries (not groups) in the database. Caller passes the cached
-# master password on stdin.
+# master password on stdin. -Rf produces a flat list with full paths
+# (e.g. "Email/Sub/deep") instead of an indented tree where children
+# lose their parent group context.
 _list_entries() {
   local pw="$1"
   _extra_args
   printf '%s\n' "$pw" \
-    | keepassxc-cli ls -q -R "${extra_args[@]}" "$DB" 2>/dev/null \
+    | keepassxc-cli ls -q -Rf "${extra_args[@]}" "$DB" 2>/dev/null \
     | grep -v '/$' \
     | sed '/^[[:space:]]*$/d'
 }
@@ -263,7 +292,25 @@ EOF
     return 1
   fi
 
-  if grep -qxF "$all_marker" <<< "$choice"; then
+  local has_all=0 has_other=0
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    if [[ "$line" == "$all_marker" ]]; then
+      has_all=1
+    else
+      has_other=1
+    fi
+  done <<< "$choice"
+
+  if (( has_all && has_other )); then
+    cat >&2 <<EOF
+kpxc: '[ all entries -> master mode ]' was marked alongside other
+entries. Pick one or the other - the two are mutually exclusive.
+EOF
+    return 1
+  fi
+
+  if (( has_all )); then
     printf 'all\n'
     return 0
   fi
@@ -279,10 +326,10 @@ _write_master_cache() {
   printf '%s\n' "$pw" > "$CACHE_MASTER"
 }
 
-# Write the scoped cache from a scope spec. Caller passes master pw via
-# stdin to _list_entries; here we use it directly for keepassxc-cli show.
+# Write the scoped cache.
+# Args: master_pw, then one scope-spec line per arg.
 _write_scoped_cache() {
-  local pw="$1" scope_spec="$2"
+  local pw="$1"; shift
   rm -f "$CACHE_MASTER" "$CACHE_SCOPED"
   install -m 600 /dev/null "$CACHE_SCOPED"
 
@@ -298,10 +345,10 @@ _write_scoped_cache() {
       printf '%s\t%s\t%s\n' "$path" "$field" "$b64" >> "$CACHE_SCOPED"
       count=$((count + 1))
     else
-      echo "kpxc: failed to fetch '$path:$field' - skipping." >&2
+      printf "kpxc: failed to fetch '%s' field=%s - skipping.\n" "$path" "$field" >&2
       failed=$((failed + 1))
     fi
-  done < <(_parse_scope "$scope_spec")
+  done < <(printf '%s\n' "$@" | _parse_scope)
 
   if (( count == 0 )); then
     rm -f "$CACHE_SCOPED"
@@ -318,34 +365,50 @@ _cmd_unlock() {
   local cli_scope_args=()
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --master)       force_master=1; shift ;;
-      --interactive)  force_interactive=1; shift ;;
+      --master)            force_master=1; shift ;;
+      --interactive|-i)    force_interactive=1; shift ;;
       --help|-h)
         cat >&2 <<'EOF'
-Usage: kpxc unlock [--master] [--interactive] [<scope-spec>...]
+Usage: kpxc unlock [--master] [-i|--interactive] [<entry-path>...]
 
 Without args (default flow):
   - if a saved scope file exists -> use it (scope mode)
   - else                          -> interactive picker, save the choice
 
-With <scope-spec> args:
-  - one-off scope mode, does NOT update the saved scope file
+With <entry-path> args:
+  - one-off scope mode, does NOT update the saved scope file. Each arg
+    is one entry path; field is always Password. For other fields, use
+    the picker (-i) or edit the scope file directly.
 
 With --master:
   - cache the master password (full keepassxc-cli access). Does NOT
     touch the saved scope file.
 
-With --interactive:
+With -i / --interactive:
   - run the picker and save the new choice, ignoring any existing
-    saved scope.
+    saved scope. Cannot be combined with --master or scope-path args.
 EOF
         exit 0
         ;;
-      --) shift; break ;;
+      --) shift; cli_scope_args+=("$@"); break ;;
+      -*) echo "kpxc unlock: unknown flag '$1'." >&2; exit 2 ;;
       *)  cli_scope_args+=("$1"); shift ;;
     esac
   done
-  cli_scope_args+=("$@")
+
+  # Reject conflicting flag combinations.
+  if (( force_master && force_interactive )); then
+    echo "kpxc unlock: --master and --interactive are mutually exclusive." >&2
+    exit 2
+  fi
+  if (( force_master )) && (( ${#cli_scope_args[@]} > 0 )); then
+    echo "kpxc unlock: --master does not take entry-path arguments. Run 'kpxc unlock' (without --master) to use a scope, or 'kpxc unlock --master' alone." >&2
+    exit 2
+  fi
+  if (( force_interactive )) && (( ${#cli_scope_args[@]} > 0 )); then
+    echo "kpxc unlock: --interactive does not take entry-path arguments. The picker will choose them." >&2
+    exit 2
+  fi
 
   _require_db
   if [[ ! -f "$DB" ]]; then
@@ -372,24 +435,30 @@ EOF
     exit 1
   fi
 
-  # Resolve mode and scope
-  local mode scope_spec=""
+  # Resolve mode and the list of scope entries (one per element).
+  local mode
+  local -a scope_entries=()
   if (( force_master )); then
     mode="master"
   elif (( force_interactive )); then
     mode="interactive"
   elif (( ${#cli_scope_args[@]} > 0 )); then
     mode="scoped-oneshot"
-    scope_spec="${cli_scope_args[*]}"
+    scope_entries=("${cli_scope_args[@]}")
   else
     # No flags, no args: try saved scope file
-    local saved
-    if saved=$(_load_scope_file 2>/dev/null); then
+    if [[ -f "$SCOPE_FILE" ]]; then
+      local saved
+      if ! saved=$(_load_scope_file); then
+        # Scope file exists but failed perm check / is empty.
+        unset PW
+        exit 1
+      fi
       if [[ "$saved" == "all" ]]; then
         mode="master"
       else
         mode="scoped-saved"
-        scope_spec="$saved"
+        mapfile -t scope_entries <<< "$saved"
       fi
     else
       mode="interactive"
@@ -406,8 +475,8 @@ EOF
       _save_scope_file "all"
       mode="master"
     else
-      scope_spec="$picked"
-      _save_scope_file "$picked"
+      mapfile -t scope_entries <<< "$picked"
+      _save_scope_file "${scope_entries[@]}"
       mode="scoped-new"
     fi
   fi
@@ -422,7 +491,7 @@ EOF
       ;;
     scoped-saved|scoped-new|scoped-oneshot)
       local stats
-      if ! stats=$(_write_scoped_cache "$PW" "$scope_spec"); then
+      if ! stats=$(_write_scoped_cache "$PW" "${scope_entries[@]}"); then
         unset PW
         echo "kpxc: scope mode requested but no entries fetched. Cache not written." >&2
         exit 1
@@ -453,7 +522,19 @@ _cmd_lock() {
   local cleared=0
   if [[ -f "$CACHE_MASTER" ]]; then rm -f "$CACHE_MASTER"; cleared=1; fi
   if [[ -f "$CACHE_SCOPED" ]]; then rm -f "$CACHE_SCOPED"; cleared=1; fi
-  rmdir "$CACHE_DIR" 2>/dev/null || true
+  if [[ -d "$CACHE_DIR" ]]; then
+    # Refuse to silently leave behind unexpected files. A legitimate
+    # cache dir only contains 'master' and 'scoped' files we manage.
+    local stray
+    stray=$(find "$CACHE_DIR" -mindepth 1 -maxdepth 1 ! -name master ! -name scoped 2>/dev/null | head -5)
+    if [[ -n "$stray" ]]; then
+      echo "kpxc: refusing to remove $CACHE_DIR because it contains unexpected files:" >&2
+      printf '  %s\n' "$stray" >&2
+      echo "Inspect and remove manually if intended." >&2
+      return 1
+    fi
+    rmdir "$CACHE_DIR" 2>/dev/null || true
+  fi
   if (( cleared )); then echo "Cache cleared"; else echo "(no cache)"; fi
 }
 
@@ -576,7 +657,7 @@ SUBCMD="$1"; shift
 case "$SUBCMD" in
   unlock) _cmd_unlock "$@"; exit 0 ;;
   lock)   _cmd_lock   "$@"; exit 0 ;;
-  get)    _cmd_get    "$@" ;;
+  get)    _cmd_get    "$@"; exit 0 ;;
   scope)  _cmd_scope  "$@"; exit 0 ;;
 esac
 

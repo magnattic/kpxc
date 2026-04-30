@@ -102,6 +102,38 @@ check_fails() {
   fi
 }
 
+# Run command, assert: exit 0, empty stderr, and stdout == expected.
+# Catches silent failures that "$(cmd)" would mask (non-zero exit + warning
+# on stderr that the user never sees).
+check_clean() {
+  local name="$1" expected="$2"; shift 2
+  local out_f err_f code=0
+  out_f=$(mktemp); err_f=$(mktemp)
+  "$@" >"$out_f" 2>"$err_f" || code=$?
+  local actual_stdout actual_stderr
+  actual_stdout=$(cat "$out_f")
+  actual_stderr=$(cat "$err_f")
+  rm -f "$out_f" "$err_f"
+
+  if (( code != 0 )); then
+    printf '  FAIL %s (exit %d)\n       stderr: %q\n' "$name" "$code" "$actual_stderr"
+    FAIL=$((FAIL + 1))
+    return
+  fi
+  if [[ -n "$actual_stderr" ]]; then
+    printf '  FAIL %s (stderr not empty)\n       stderr: %q\n' "$name" "$actual_stderr"
+    FAIL=$((FAIL + 1))
+    return
+  fi
+  if [[ "$expected" != "$actual_stdout" ]]; then
+    printf '  FAIL %s\n       expected: %q\n       actual:   %q\n' "$name" "$expected" "$actual_stdout"
+    FAIL=$((FAIL + 1))
+    return
+  fi
+  printf '  ok   %s\n' "$name"
+  PASS=$((PASS + 1))
+}
+
 echo "Building fixture..."
 build_fixture
 
@@ -114,10 +146,10 @@ check_fails "kpxc show exits non-zero without cache" kpxc show -a Password Email
 echo
 echo "## kpxc get with master cache (legacy mode)"
 prime_master_cache
-check "kpxc get default returns Password" "secret123" "$(kpxc get Email/personal)"
-check "kpxc get -a Username returns user" "alice" "$(kpxc get Email/personal -a Username)"
-check "kpxc get -a URL returns URL" "https://prod.example.com" "$(kpxc get Servers/prod -a URL)"
-check "kpxc get Backup/restic returns Password" "resticpw" "$(kpxc get Backup/restic)"
+check_clean "kpxc get default returns Password" "secret123" kpxc get Email/personal
+check_clean "kpxc get -a Username returns user" "alice" kpxc get Email/personal -a Username
+check_clean "kpxc get -a URL returns URL" "https://prod.example.com" kpxc get Servers/prod -a URL
+check_clean "kpxc get Backup/restic returns Password" "resticpw" kpxc get Backup/restic
 
 echo
 echo "## kpxc generic wrapper (master mode)"
@@ -136,9 +168,9 @@ prime_scoped_cache \
   "Email/personal:Password=secret123" \
   "Email/personal:Username=alice" \
   "Backup/restic:Password=resticpw"
-check "kpxc get default returns scoped Password" "secret123" "$(kpxc get Email/personal)"
-check "kpxc get -a Username returns scoped Username" "alice" "$(kpxc get Email/personal -a Username)"
-check "kpxc get scoped Backup/restic" "resticpw" "$(kpxc get Backup/restic)"
+check_clean "kpxc get default returns scoped Password" "secret123" kpxc get Email/personal
+check_clean "kpxc get -a Username returns scoped Username" "alice" kpxc get Email/personal -a Username
+check_clean "kpxc get scoped Backup/restic" "resticpw" kpxc get Backup/restic
 
 echo
 echo "## kpxc get refuses out-of-scope entries"
@@ -247,7 +279,7 @@ echo
 echo "## values containing tabs/newlines survive base64 round-trip"
 prime_scoped_cache $'Email/quirky:Password=line1\nline2\ttabbed'
 expected=$'line1\nline2\ttabbed'
-check "scoped cache preserves newlines and tabs" "$expected" "$(kpxc get Email/quirky)"
+check_clean "scoped cache preserves newlines and tabs" "$expected" kpxc get Email/quirky
 
 echo
 echo "## migration: legacy v0.3 cache file path"
@@ -269,6 +301,30 @@ chmod 600 "$SCOPE_PATH"
 out="$(env KPXC_SCOPE="$SCOPE_PATH" kpxc scope 2>&1 || true)"
 check_contains "scope command shows scope file when 0600" "Saved scope" "$out"
 check_contains "scope command lists entry from scope file" "Email/personal" "$out"
+
+echo
+echo "## scope file roundtrip preserves tricky paths/fields"
+# Regression: C3 (spaces in path got word-split) and C4 (':' was treated as
+# the field separator, breaking entry titles like "Email/foo: bar").
+TRICKY="$WORKDIR/scope-tricky"
+{
+  printf '%s\n' 'Email/My Personal Account'
+  printf '%s\t%s\n' 'Servers/prod' 'Username'
+  printf '%s\t%s\n' 'Notes/Has:Colon' 'Password,URL'
+  printf '# a comment\n'
+  printf '   \n'   # blank-ish line
+} > "$TRICKY"
+chmod 600 "$TRICKY"
+out="$(env KPXC_SCOPE="$TRICKY" kpxc scope 2>&1 || true)"
+check_contains "scope file preserves spaces in path" "Email/My Personal Account" "$out"
+check_contains "scope file preserves TAB-separated Username field" $'Servers/prod\tUsername' "$out"
+check_contains "scope file preserves colon in entry title" "Notes/Has:Colon" "$out"
+check_contains "scope file does not echo comment lines" "Saved scope" "$out"
+[[ "$out" != *"a comment"* ]] && {
+  printf '  ok   scope file strips comments\n'; PASS=$((PASS + 1))
+} || {
+  printf '  FAIL scope file leaked comment to output\n'; FAIL=$((FAIL + 1))
+}
 
 echo
 echo "## unlock requires TTY"

@@ -35,32 +35,29 @@ kpxc get "Email/personal" -a User # any keepassxc-cli show field
 kpxc lock                         # clear cache
 ```
 
-First unlock looks like this:
+First unlock opens an [fzf](https://github.com/junegunn/fzf) picker:
 
 ```
 $ kpxc unlock
 KeePass master password: ****
 
-Available entries:
-   1) Email/personal
-   2) Email/work
-   3) Servers/prod
-   4) Backup/restic
-   5) Banking/main
+  TAB to mark, ENTER to confirm, ESC to cancel.
+  Mark "[ all entries -> master mode ]" to cache the master password instead.
+  kpxc> banking
+> Banking/main
+  Banking/savings
+  Banking/joint
 
-Which entries should kpxc cache without re-prompting?
-  Numbers (e.g. 1,3,5), exact names, patterns (e.g. 'Email/*'),
-  or 'all' for full master-mode access.
-> 1,4
+  3/612
 
-Saved scope to /home/you/.config/kpxc/scope.
-Cached 2 scoped credential(s).
-Master password discarded.
+[type to fuzzy-search; TAB to mark; ENTER to confirm]
 ```
 
-The choice is persisted to `~/.config/kpxc/scope`; subsequent
-`kpxc unlock` calls just prompt for the master password and reuse the
-saved scope.
+Mark the entries you want to cache, hit Enter. The choice is persisted
+to `~/.config/kpxc/scope` and reused on every later `kpxc unlock`.
+
+Don't have fzf? Install it (`apt install fzf` / `brew install fzf` /
+`pacman -S fzf`), or edit `~/.config/kpxc/scope` by hand.
 
 ## Why scope mode is the default
 
@@ -184,20 +181,23 @@ The cache lives in RAM only (tmpfs is in-memory). Gone after reboot or
 
 ### Dependencies
 
-You need `keepassxc-cli` in `$PATH`.
+You need `keepassxc-cli` in `$PATH`. `fzf` is required only for the
+interactive `kpxc unlock` picker; without it, you can still use kpxc by
+editing the scope file by hand or with `kpxc unlock --master`.
 
 ```sh
 # Debian/Ubuntu (newer releases also have keepassxc-minimal, no GUI deps)
-sudo apt install keepassxc
+sudo apt install keepassxc fzf
 
 # Arch
-sudo pacman -S keepassxc
+sudo pacman -S keepassxc fzf
 
 # Fedora
-sudo dnf install keepassxc
+sudo dnf install keepassxc fzf
 
 # macOS: brew installs the CLI inside the .app bundle, symlink it into PATH:
 brew install --cask keepassxc
+brew install fzf
 sudo ln -s /Applications/KeePassXC.app/Contents/MacOS/keepassxc-cli \
            /usr/local/bin/keepassxc-cli
 ```

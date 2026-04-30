@@ -198,99 +198,77 @@ _list_entries() {
     | sed '/^[[:space:]]*$/d'
 }
 
-# Interactive picker. Reads master pw from arg, queries entries, prompts
-# user, returns selection (one entry per line) on stdout, or "all" for
-# master mode.
+# Interactive picker. Reads master pw, queries entries, presents an
+# fzf-based multi-select prompt. Returns selection (one entry per line)
+# on stdout, or "all" for master mode.
 _pick_scope() {
   local pw="$1"
 
-  local entries=()
-  local line
-  while IFS= read -r line; do
-    [[ -z "$line" ]] && continue
-    entries+=("$line")
-  done < <(_list_entries "$pw")
+  if ! command -v fzf >/dev/null 2>&1; then
+    cat >&2 <<'EOF'
+kpxc: 'kpxc unlock' picker requires fzf.
 
-  if (( ${#entries[@]} == 0 )); then
+Install it:
+  Debian/Ubuntu: sudo apt install fzf
+  Arch:          sudo pacman -S fzf
+  Fedora:        sudo dnf install fzf
+  macOS:         brew install fzf
+
+Or skip the picker by pre-creating the scope file:
+  $EDITOR ~/.config/kpxc/scope     # one entry per line
+  chmod 600 ~/.config/kpxc/scope
+  kpxc unlock                      # will use the file
+
+Or use master mode:
+  kpxc unlock --master
+EOF
+    return 1
+  fi
+
+  local entries
+  entries=$(_list_entries "$pw")
+  if [[ -z "$entries" ]]; then
     echo "kpxc: no entries found in database." >&2
     return 1
   fi
 
-  {
-    echo
-    echo "Available entries:"
-    local i=1
-    for e in "${entries[@]}"; do
-      printf '  %2d) %s\n' "$i" "$e"
-      i=$((i + 1))
-    done
-    echo
-    echo "Which entries should kpxc cache without re-prompting?"
-    echo "  Numbers (e.g. 1,3,5), exact names, patterns (e.g. 'Email/*'),"
-    echo "  or 'all' for full master-mode access."
-  } >&2
+  local count
+  count=$(printf '%s\n' "$entries" | wc -l)
+
+  # Sentinel option for "all entries" -> master mode. Marked with a
+  # leading character that can't appear in keepassxc paths.
+  local all_marker='[ all entries -> master mode ]'
 
   local choice
-  IFS= read -rp "> " choice </dev/tty
-
-  if [[ "$choice" == "all" ]]; then
-    printf 'all\n'
-    return 0
-  fi
-
-  local selected=()
-  local IFS_orig="$IFS"
-  IFS=',' read -ra tokens <<< "$choice"
-  IFS="$IFS_orig"
-
-  for tok in "${tokens[@]}"; do
-    # trim whitespace
-    tok="${tok#"${tok%%[![:space:]]*}"}"
-    tok="${tok%"${tok##*[![:space:]]}"}"
-    [[ -z "$tok" ]] && continue
-
-    if [[ "$tok" =~ ^[0-9]+$ ]]; then
-      local idx=$((tok - 1))
-      if (( idx < 0 || idx >= ${#entries[@]} )); then
-        echo "kpxc: out of range: $tok" >&2
-        return 1
-      fi
-      selected+=("${entries[$idx]}")
-    elif [[ "$tok" == *"*"* || "$tok" == *"?"* || "$tok" == *"["* ]]; then
-      local matched=0
-      for e in "${entries[@]}"; do
-        # shellcheck disable=SC2053
-        if [[ "$e" == $tok ]]; then
-          selected+=("$e")
-          matched=$((matched + 1))
-        fi
-      done
-      if (( matched == 0 )); then
-        echo "kpxc: pattern matched no entries: $tok" >&2
-        return 1
-      fi
-    else
-      local found=0
-      for e in "${entries[@]}"; do
-        if [[ "$e" == "$tok" ]]; then
-          selected+=("$e")
-          found=1
-          break
-        fi
-      done
-      if (( found == 0 )); then
-        echo "kpxc: entry not found: $tok" >&2
-        return 1
-      fi
-    fi
-  done
-
-  if (( ${#selected[@]} == 0 )); then
+  if ! choice=$(
+    {
+      printf '%s\n' "$all_marker"
+      printf '%s\n' "$entries"
+    } | fzf \
+        --multi \
+        --height=80% \
+        --layout=reverse \
+        --border \
+        --prompt='kpxc> ' \
+        --header=$'TAB to mark, ENTER to confirm, ESC to cancel.\nMark "[ all entries -> master mode ]" to cache the master password instead.' \
+        --info=inline \
+        --bind='ctrl-a:select-all,ctrl-d:deselect-all'
+  ); then
     echo "kpxc: nothing selected." >&2
     return 1
   fi
 
-  printf '%s\n' "${selected[@]}"
+  if [[ -z "$choice" ]]; then
+    echo "kpxc: nothing selected." >&2
+    return 1
+  fi
+
+  if grep -qxF "$all_marker" <<< "$choice"; then
+    printf 'all\n'
+    return 0
+  fi
+
+  printf '%s\n' "$choice"
 }
 
 # Write the master cache.

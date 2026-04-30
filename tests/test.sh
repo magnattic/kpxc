@@ -277,6 +277,13 @@ err_out="$(echo somepw | kpxc unlock 2>&1 || true)"
 check_contains "unlock without TTY produces clear error" "requires a TTY" "$err_out"
 
 echo
+echo "## picker has fzf-required error path"
+# The picker is only reachable after password prompt (TTY-only), so end-to-end
+# testing isn't practical here. Verify the fzf-missing message exists.
+check_contains "fzf-required message present in script" \
+  "picker requires fzf" "$(grep -m1 'picker requires fzf' "$BIN/kpxc" || true)"
+
+echo
 echo "## Results"
 printf 'Passed: %d   Failed: %d\n' "$PASS" "$FAIL"
 [[ $FAIL -eq 0 ]]

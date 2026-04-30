@@ -41,16 +41,21 @@ First unlock opens an [fzf](https://github.com/junegunn/fzf) picker:
 $ kpxc unlock
 KeePass master password: ****
 
-  TAB to mark, ENTER to confirm, ESC to cancel.
-  Mark "[ all entries -> master mode ]" to cache the master password instead.
+First-time setup: pick which credentials to cache for CLI use.
+Master password is discarded after this -- only your selections stay.
+
+  Pick which entries to cache for `kpxc get` (mail, backup, SSH, ...).
+  Your selection is saved; the master password is discarded afterwards.
+
+  TAB to mark · ENTER to confirm · ESC to cancel
+  Or mark the top option to cache the master password (full DB access).
+
   kpxc> banking
 > Banking/main
   Banking/savings
   Banking/joint
 
   3/612
-
-[type to fuzzy-search; TAB to mark; ENTER to confirm]
 ```
 
 Mark the entries you want to cache, hit Enter. The choice is persisted

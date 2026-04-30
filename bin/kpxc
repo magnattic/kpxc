@@ -292,9 +292,16 @@ EOF
   local count
   count=$(printf '%s\n' "$entries" | wc -l)
 
-  # Sentinel option for "all entries" -> master mode. Marked with a
-  # leading character that can't appear in keepassxc paths.
-  local all_marker='[ all entries -> master mode ]'
+  # Sentinel option that switches kpxc into master mode. Leading '★'
+  # cannot appear in keepassxc paths, so there's no ambiguity when we
+  # later compare the user's selection against this string.
+  local all_marker='★ Cache master password (full DB access)'
+
+  local header
+  header=$'Pick which entries to cache for `kpxc get` (mail, backup, SSH, ...).\n'
+  header+=$'Your selection is saved; the master password is discarded afterwards.\n\n'
+  header+=$'TAB to mark · ENTER to confirm · ESC to cancel\n'
+  header+=$'Or mark the top option to cache the master password (full DB access).'
 
   local choice
   if ! choice=$(
@@ -307,7 +314,7 @@ EOF
         --layout=reverse \
         --border \
         --prompt='kpxc> ' \
-        --header=$'TAB to mark, ENTER to confirm, ESC to cancel.\nMark "[ all entries -> master mode ]" to cache the master password instead.' \
+        --header="$header" \
         --info=inline \
         --bind='ctrl-a:select-all,ctrl-d:deselect-all'
   ); then
@@ -331,10 +338,10 @@ EOF
   done <<< "$choice"
 
   if (( has_all && has_other )); then
-    cat >&2 <<EOF
-kpxc: '[ all entries -> master mode ]' was marked alongside other
-entries. Pick one or the other - the two are mutually exclusive.
-EOF
+    {
+      echo "kpxc: '$all_marker' was marked alongside other entries."
+      echo "Pick one or the other - the two are mutually exclusive."
+    } >&2
     return 1
   fi
 
@@ -494,6 +501,16 @@ EOF
   fi
 
   if [[ "$mode" == "interactive" ]]; then
+    # First-time setup banner: only when there is no saved scope yet.
+    # Re-picks via -i don't show this (the user knows the drill).
+    if [[ ! -f "$SCOPE_FILE" ]]; then
+      cat >&2 <<'EOF'
+
+First-time setup: pick which credentials to cache for CLI use.
+Master password is discarded after this -- only your selections stay.
+
+EOF
+    fi
     local picked
     if ! picked=$(_pick_scope "$PW"); then
       unset PW

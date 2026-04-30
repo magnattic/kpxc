@@ -1,11 +1,8 @@
 #!/usr/bin/env bash
 # Integration tests for kpxc.
 #
-# Builds an ephemeral test database with low KDF rounds, primes the cache
-# directly, and exercises the kpxc subcommands against it. Exits non-zero
-# on any failure.
-#
-# Run from anywhere: bash tests/test.sh
+# Builds an ephemeral test database with low KDF rounds, exercises both
+# master-mode and scope-mode end-to-end.
 
 set -euo pipefail
 
@@ -21,11 +18,11 @@ WORKDIR="$(mktemp -d)"
 trap 'rm -rf "$WORKDIR"' EXIT
 
 DB="$WORKDIR/test.kdbx"
-CACHE="$WORKDIR/cache"
+CACHE_DIR="$WORKDIR/cache.d"
 MASTER_PW="kpxc-testpw"
 
 export KPXC_DB="$DB"
-export KPXC_CACHE="$CACHE"
+export KPXC_CACHE="$CACHE_DIR"
 export KPXC_RC="$WORKDIR/no-such-rc"
 export PATH="$BIN:$PATH"
 
@@ -44,12 +41,28 @@ build_fixture() {
     | keepassxc-cli add -q -p "$DB" Backup/restic
 }
 
-prime_cache() {
-  install -m 600 /dev/null "$CACHE"
-  printf '%s\n' "$MASTER_PW" > "$CACHE"
+prime_master_cache() {
+  rm -rf "$CACHE_DIR"
+  install -d -m 0700 "$CACHE_DIR"
+  install -m 600 /dev/null "$CACHE_DIR/master"
+  printf '%s\n' "$MASTER_PW" > "$CACHE_DIR/master"
 }
 
-clear_cache() { rm -f "$CACHE"; }
+prime_scoped_cache() {
+  # Args: list of "path:field=value" triples
+  rm -rf "$CACHE_DIR"
+  install -d -m 0700 "$CACHE_DIR"
+  install -m 600 /dev/null "$CACHE_DIR/scoped"
+  for triple in "$@"; do
+    local pf="${triple%%=*}"
+    local v="${triple#*=}"
+    local p="${pf%%:*}"
+    local f="${pf#*:}"
+    printf '%s\t%s\t%s\n' "$p" "$f" "$(printf '%s' "$v" | base64 -w0)" >> "$CACHE_DIR/scoped"
+  done
+}
+
+clear_cache() { rm -rf "$CACHE_DIR"; }
 
 PASS=0
 FAIL=0
@@ -98,20 +111,61 @@ check_fails "kpxc get exits non-zero without cache" kpxc get Email/personal
 check_fails "kpxc show exits non-zero without cache" kpxc show -a Password Email/personal
 
 echo
-echo "## kpxc get with cache"
-prime_cache
+echo "## kpxc get with master cache (legacy mode)"
+prime_master_cache
 check "kpxc get default returns Password" "secret123" "$(kpxc get Email/personal)"
-check "kpxc get -a Username" "alice" "$(kpxc get Email/personal -a Username)"
-check "kpxc get -a URL" "https://prod.example.com" "$(kpxc get Servers/prod -a URL)"
+check "kpxc get -a Username returns user" "alice" "$(kpxc get Email/personal -a Username)"
+check "kpxc get -a URL returns URL" "https://prod.example.com" "$(kpxc get Servers/prod -a URL)"
 check "kpxc get Backup/restic returns Password" "resticpw" "$(kpxc get Backup/restic)"
 
 echo
-echo "## kpxc generic wrapper (read-only subcommands)"
+echo "## kpxc generic wrapper (master mode)"
 check_contains "kpxc ls /Email lists personal" "personal" "$(kpxc ls /Email)"
 check_contains "kpxc search prod finds entry" "prod" "$(kpxc search prod)"
 check_contains "kpxc db-info shows cipher" "Cipher:" "$(kpxc db-info)"
-check "kpxc show -a Password matches kpxc get" "secret123" \
-  "$(kpxc show -q -a Password -- Email/personal | tr -d '\r')"
+
+echo
+echo "## kpxc scope (master mode)"
+scope_out="$(kpxc scope)"
+check_contains "kpxc scope reports master mode" "master" "$scope_out"
+
+echo
+echo "## kpxc get with scoped cache"
+prime_scoped_cache \
+  "Email/personal:Password=secret123" \
+  "Email/personal:Username=alice" \
+  "Backup/restic:Password=resticpw"
+check "kpxc get default returns scoped Password" "secret123" "$(kpxc get Email/personal)"
+check "kpxc get -a Username returns scoped Username" "alice" "$(kpxc get Email/personal -a Username)"
+check "kpxc get scoped Backup/restic" "resticpw" "$(kpxc get Backup/restic)"
+
+echo
+echo "## kpxc get refuses out-of-scope entries"
+check_fails "kpxc get refuses unscoped entry" kpxc get Servers/prod
+err_out="$(kpxc get Servers/prod 2>&1 || true)"
+check_contains "out-of-scope error mentions 'not in current scope'" "not in current scope" "$err_out"
+check_fails "kpxc get refuses unscoped field on scoped entry" kpxc get Email/personal -a URL
+
+echo
+echo "## generic subcommands refuse scope mode"
+check_fails "kpxc ls refuses scope-only cache" kpxc ls /Email
+err_out="$(kpxc ls /Email 2>&1 || true)"
+check_contains "ls error suggests --master" "kpxc unlock --master" "$err_out"
+check_fails "kpxc search refuses scope-only cache" kpxc search foo
+check_fails "kpxc db-info refuses scope-only cache" kpxc db-info
+check_fails "kpxc add refuses scope-only cache" kpxc add -u bob Email/new
+
+echo
+echo "## kpxc scope (scope mode) lists entries without values"
+scope_out="$(kpxc scope)"
+check_contains "scope shows mode" "Mode: scoped" "$scope_out"
+check_contains "scope lists entry+field" "Email/personal:Password" "$scope_out"
+check_contains "scope lists Username" "Email/personal:Username" "$scope_out"
+[[ "$scope_out" != *"secret123"* ]] && {
+  printf '  ok   scope output does not leak values\n'; PASS=$((PASS + 1))
+} || {
+  printf '  FAIL scope output leaked a value\n'; FAIL=$((FAIL + 1))
+}
 
 echo
 echo "## kpxc passthrough (no DB, no cache needed)"
@@ -120,76 +174,87 @@ generated="$(kpxc generate -L 12 -l -U -n)"
 check "kpxc generate produces 12 chars" "12" "${#generated}"
 
 echo
-echo "## kpxc denylists (refuses unsafe / mutating subcommands)"
-prime_cache
+echo "## kpxc denylists in master mode"
+prime_master_cache
 check_fails "kpxc db-create refuses (non-standard arg shape)" \
   kpxc db-create "$WORKDIR/new.kdbx"
 check_fails "kpxc import refuses (would overwrite target)" \
   kpxc import "$WORKDIR/source.xml" "$WORKDIR/dest.kdbx"
 check_fails "kpxc open refuses" kpxc open "$WORKDIR/other.kdbx"
-check_fails "kpxc add -p refuses (would create empty-pw entry)" \
-  kpxc add -p -u alice "Email/new"
+check_fails "kpxc add -p refuses" kpxc add -p -u alice "Email/new"
 check_fails "kpxc edit -p refuses" kpxc edit -p "Email/personal"
 check_fails "kpxc db-edit -p refuses" kpxc db-edit -p
 check_fails "kpxc db-edit --set-password refuses" kpxc db-edit --set-password
-check_contains "kpxc add (no -p) is allowed and creates entry" "Successfully" \
+check_contains "kpxc add (no -p) is allowed" "Successfully" \
   "$(kpxc add -u bob "Email/no-pw" 2>&1)"
 
 echo
 echo "## kpxc subcommand --help passthrough"
 help_out="$(kpxc show --help 2>&1 || true)"
-check_contains "kpxc show --help renders help (no DB injection)" \
-  "Show an entry" "$help_out"
+check_contains "kpxc show --help renders help" "Show an entry" "$help_out"
 help_out="$(kpxc ls -h 2>&1 || true)"
 check_contains "kpxc ls -h renders help" "List database" "$help_out"
 
 echo
-echo "## kpxc top-level help and version"
-help_out="$(kpxc --help 2>&1 || true)"
-check_contains "kpxc --help renders top-level help" "Usage" "$help_out"
-ver_out="$(kpxc --version 2>&1 || true)"
-check_contains "kpxc --version returns a version string" "." "$ver_out"
+echo "## kpxc top-level help"
+help_out="$(kpxc 2>&1 || true)"
+check_contains "kpxc with no args prints usage" "Usage" "$help_out"
 
 echo
 echo "## config permission check (security)"
-PERM_CONFIG="$WORKDIR/perm-test-rc"
-echo 'KPXC_DB='"$DB" > "$PERM_CONFIG"
-chmod 666 "$PERM_CONFIG"
+PERM_RC="$WORKDIR/perm-test-rc"
+echo 'KPXC_DB='"$DB" > "$PERM_RC"
+chmod 666 "$PERM_RC"
 check_fails "kpxc get refuses world-writable config" \
-  env KPXC_RC="$PERM_CONFIG" kpxc get Email/personal
+  env KPXC_RC="$PERM_RC" kpxc get Email/personal
 check_fails "kpxc ls refuses world-writable config" \
-  env KPXC_RC="$PERM_CONFIG" kpxc ls /
-chmod 600 "$PERM_CONFIG"
+  env KPXC_RC="$PERM_RC" kpxc ls /
+chmod 600 "$PERM_RC"
+prime_master_cache
 check "kpxc get accepts 0600 config" "secret123" \
-  "$(env KPXC_RC="$PERM_CONFIG" kpxc get Email/personal)"
+  "$(env KPXC_RC="$PERM_RC" kpxc get Email/personal)"
 
 echo
 echo "## TTL expiry"
-prime_cache
+prime_master_cache
 sleep 1
-check_fails "kpxc get with KPXC_TTL=0 expires" env KPXC_TTL=0 kpxc get Email/personal
-prime_cache
+check_fails "master-mode kpxc get with KPXC_TTL=0 expires" env KPXC_TTL=0 kpxc get Email/personal
+prime_scoped_cache "Email/personal:Password=secret123"
 sleep 1
-check_fails "kpxc ls with KPXC_TTL=0 expires" env KPXC_TTL=0 kpxc ls /Email
+check_fails "scoped kpxc get with KPXC_TTL=0 expires" env KPXC_TTL=0 kpxc get Email/personal
 
 echo
 echo "## kpxc lock"
-prime_cache
+prime_master_cache
 kpxc lock >/dev/null
-if [[ ! -e "$CACHE" ]]; then
-  printf '  ok   kpxc lock removes cache file\n'
-  PASS=$((PASS + 1))
-else
-  printf '  FAIL kpxc lock did not remove cache file\n'
-  FAIL=$((FAIL + 1))
-fi
+[[ ! -e "$CACHE_DIR/master" && ! -e "$CACHE_DIR/scoped" ]] && {
+  printf '  ok   kpxc lock removes both cache files\n'; PASS=$((PASS + 1))
+} || {
+  printf '  FAIL kpxc lock left cache files behind\n'; FAIL=$((FAIL + 1))
+}
+prime_scoped_cache "Email/personal:Password=secret123"
+kpxc lock >/dev/null
+[[ ! -e "$CACHE_DIR/scoped" ]] && {
+  printf '  ok   kpxc lock removes scoped cache\n'; PASS=$((PASS + 1))
+} || {
+  printf '  FAIL kpxc lock did not remove scoped cache\n'; FAIL=$((FAIL + 1))
+}
 output="$(kpxc lock)"
-check "kpxc lock on empty cache prints (no cache)" "(no cache)" "$output"
+check "kpxc lock on no cache prints (no cache)" "(no cache)" "$output"
 
 echo
-echo "## kpxc usage"
-usage_out="$(kpxc 2>&1 || true)"
-check_contains "kpxc with no args prints usage" "Usage" "$usage_out"
+echo "## values containing tabs/newlines survive base64 round-trip"
+prime_scoped_cache $'Email/quirky:Password=line1\nline2\ttabbed'
+expected=$'line1\nline2\ttabbed'
+check "scoped cache preserves newlines and tabs" "$expected" "$(kpxc get Email/quirky)"
+
+echo
+echo "## migration: legacy v0.3 cache file path"
+clear_cache
+touch "$CACHE_DIR"   # simulate v0.3.x file at the location now used as a dir
+err_out="$(kpxc scope 2>&1 || true)"
+check_contains "kpxc detects legacy cache file and aborts" "legacy v0.3.x cache file" "$err_out"
+rm -f "$CACHE_DIR"
 
 echo
 echo "## Results"

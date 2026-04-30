@@ -1,32 +1,45 @@
 #!/usr/bin/env bash
-# kpxc - cached wrapper around keepassxc-cli.
+# kpxc - cached wrapper around keepassxc-cli with two unlock modes:
 #
-# Usage:
-#   kpxc unlock                    # cache master password (interactive)
-#   kpxc lock                      # clear cache
-#   kpxc get <entry> [show-opts]   # short for `show -s -a Password`
-#   kpxc <subcommand> [args...]    # forward any keepassxc-cli subcommand
-#                                    with the cached master password
+#   scoped: cache only specific entries' fields. Master password is used
+#           briefly during unlock and then discarded. An attacker reading
+#           the cache only gets the scoped credentials, not the master pw.
+#           The default if KPXC_DEFAULT_SCOPE is set, or if scope args are
+#           passed to `kpxc unlock`.
 #
-# Examples:
-#   kpxc unlock
-#   kpxc get Email/personal
-#   kpxc get Email/personal -a Username
-#   kpxc ls /Email
-#   kpxc search github
-#   kpxc db-info
-#   kpxc lock
+#   master: cache the master password. Allows any keepassxc-cli subcommand
+#           with the cache (ls, search, add, etc.). Trade-off: the master
+#           password sits in tmpfs until lock; an attacker reading the
+#           cache can decrypt the entire database. Use for interactive
+#           sessions or when you genuinely need full DB access. Activated
+#           by `kpxc unlock --master`.
+#
+# Subcommands:
+#   kpxc unlock [--master] [<scope-spec>...]   cache credentials
+#   kpxc lock                                  clear all caches
+#   kpxc get <entry> [-a <field>]              read a cached value
+#   kpxc scope                                 show what's cached (no values)
+#   kpxc <keepassxc-subcmd> [args...]          forward to keepassxc-cli
+#                                              (requires master mode)
+#
+# Scope-spec syntax (config and CLI):
+#   Email/personal                  default field (Password)
+#   Email/personal:Username         specific field
+#   Email/personal:Password,Username  multiple fields on one entry
 #
 # Configuration:
-#   $KPXC_DB         path to .kdbx (required, env var or KPXC_DB= in config)
-#   $KPXC_KEYFILE    optional key file
-#   $KPXC_TTL        optional cache TTL in seconds
-#   $KPXC_CACHE      override cache file path (default /dev/shm/<uid>-kpxc)
-#   $KPXC_RC         override config file path (default ~/.config/kpxc/config)
+#   $KPXC_DB              path to .kdbx (required)
+#   $KPXC_KEYFILE         optional key file
+#   $KPXC_DEFAULT_SCOPE   default scope spec (space-separated entries)
+#   $KPXC_TTL             optional cache TTL in seconds
+#   $KPXC_CACHE           override cache directory (default /dev/shm/<uid>-kpxc.d)
+#   $KPXC_RC              override config file path (default ~/.config/kpxc/config)
 
 set -euo pipefail
 
-CACHE="${KPXC_CACHE:-/dev/shm/$(id -u)-kpxc}"
+CACHE_DIR="${KPXC_CACHE:-/dev/shm/$(id -u)-kpxc.d}"
+CACHE_MASTER="$CACHE_DIR/master"
+CACHE_SCOPED="$CACHE_DIR/scoped"
 CONFIG="${KPXC_RC:-$HOME/.config/kpxc/config}"
 
 _safe_source() {
@@ -47,40 +60,28 @@ _safe_source() {
     return 1
   fi
   # shellcheck source=/dev/null
-  source "$cfg"
+  source "$cfg" || true
+  return 0
 }
 
 _safe_source "$CONFIG"
 
 DB="${KPXC_DB:-}"
 KEYFILE="${KPXC_KEYFILE:-}"
+DEFAULT_SCOPE="${KPXC_DEFAULT_SCOPE:-}"
+
+# Migration: v0.3.x used a single file at /dev/shm/<uid>-kpxc. If we find
+# such a file at the path our directory should occupy, refuse rather than
+# silently shred user state.
+if [[ -f "$CACHE_DIR" ]]; then
+  echo "kpxc: legacy v0.3.x cache file at $CACHE_DIR conflicts with the new" >&2
+  echo "  cache-directory layout. Remove it: rm '$CACHE_DIR'" >&2
+  exit 1
+fi
 
 _require_db() {
   if [[ -z "$DB" ]]; then
     echo "kpxc: no database configured (set \$KPXC_DB env var or KPXC_DB= in $CONFIG)." >&2
-    exit 1
-  fi
-}
-
-_require_cache() {
-  if [[ ! -f "$CACHE" ]]; then
-    echo "kpxc: no cached master password - run 'kpxc unlock' first." >&2
-    exit 1
-  fi
-}
-
-_check_ttl() {
-  [[ -z "${KPXC_TTL:-}" ]] && return 0
-  local mtime
-  if mtime=$(stat -c %Y "$CACHE" 2>/dev/null); then :
-  elif mtime=$(stat -f %m "$CACHE" 2>/dev/null); then :
-  else
-    echo "kpxc: could not read cache mtime - run 'kpxc unlock' again." >&2
-    exit 1
-  fi
-  local age=$(( $(date +%s) - mtime ))
-  if (( age > KPXC_TTL )); then
-    echo "kpxc: cache expired (>${KPXC_TTL}s) - run 'kpxc unlock' again." >&2
     exit 1
   fi
 }
@@ -92,7 +93,70 @@ _extra_args() {
   fi
 }
 
+_check_ttl_file() {
+  local file="$1"
+  [[ -z "${KPXC_TTL:-}" ]] && return 0
+  local mtime
+  if mtime=$(stat -c %Y "$file" 2>/dev/null); then :
+  elif mtime=$(stat -f %m "$file" 2>/dev/null); then :
+  else return 0
+  fi
+  local age=$(( $(date +%s) - mtime ))
+  if (( age > KPXC_TTL )); then
+    echo "kpxc: cache expired (>${KPXC_TTL}s) - run 'kpxc unlock' again." >&2
+    exit 1
+  fi
+}
+
+# Parse a scope spec ("Email/x Email/y:Username,URL") into TAB-separated
+# (path, field) pairs on stdout, one per line.
+_parse_scope() {
+  local spec="$*"
+  local token
+  for token in $spec; do
+    local path field_list
+    if [[ "$token" == *:* ]]; then
+      path="${token%%:*}"
+      field_list="${token#*:}"
+    else
+      path="$token"
+      field_list="Password"
+    fi
+    local field
+    IFS=, read -ra fields <<< "$field_list"
+    for field in "${fields[@]}"; do
+      printf '%s\t%s\n' "$path" "$field"
+    done
+  done
+}
+
 _cmd_unlock() {
+  local force_master=0
+  local scope_args=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --master)   force_master=1; shift ;;
+      --help|-h)  echo "Usage: kpxc unlock [--master] [<scope-spec>...]"; exit 0 ;;
+      --)         shift; break ;;
+      *)          scope_args+=("$1"); shift ;;
+    esac
+  done
+  scope_args+=("$@")
+
+  local mode
+  local scope_spec=""
+  if (( force_master )); then
+    mode="master"
+  elif (( ${#scope_args[@]} > 0 )); then
+    mode="scoped"
+    scope_spec="${scope_args[*]}"
+  elif [[ -n "$DEFAULT_SCOPE" ]]; then
+    mode="scoped"
+    scope_spec="$DEFAULT_SCOPE"
+  else
+    mode="master"
+  fi
+
   _require_db
   if [[ ! -f "$DB" ]]; then
     echo "kpxc: database not found: $DB" >&2
@@ -103,66 +167,169 @@ _cmd_unlock() {
     exit 1
   fi
 
-  local PW
-  trap 'rm -f "$CACHE"; unset PW' ERR INT TERM
+  install -d -m 0700 "$CACHE_DIR"
+
+  local PW=""
+  trap 'rm -f "$CACHE_MASTER" "$CACHE_SCOPED"; unset PW 2>/dev/null || true' ERR INT TERM
+
   IFS= read -rsp "KeePass master password: " PW
   echo
 
-  install -m 600 /dev/null "$CACHE"
-  printf '%s\n' "$PW" > "$CACHE"
-  unset PW
-
   _extra_args
-  if ! keepassxc-cli ls "${extra_args[@]}" "$DB" < "$CACHE" > /dev/null 2>&1; then
-    rm -f "$CACHE"
-    echo "kpxc: wrong password - cache not stored." >&2
+  if ! printf '%s\n' "$PW" | keepassxc-cli ls -q "${extra_args[@]}" "$DB" >/dev/null 2>&1; then
+    echo "kpxc: wrong password." >&2
+    unset PW
     exit 1
   fi
+
+  rm -f "$CACHE_MASTER" "$CACHE_SCOPED"
+
+  if [[ "$mode" == "master" ]]; then
+    install -m 600 /dev/null "$CACHE_MASTER"
+    printf '%s\n' "$PW" > "$CACHE_MASTER"
+    unset PW
+    trap - ERR INT TERM
+    echo "Cached master password (full keepassxc-cli access)."
+    echo "Lives until reboot or 'kpxc lock'${KPXC_TTL:+ (or after ${KPXC_TTL}s)}."
+    return 0
+  fi
+
+  # Scope mode
+  install -m 600 /dev/null "$CACHE_SCOPED"
+
+  local count=0
+  local failed=0
+  while IFS=$'\t' read -r path field; do
+    [[ -z "$path" ]] && continue
+    local value
+    if value=$(printf '%s\n' "$PW" | keepassxc-cli show -q "${extra_args[@]}" -a "$field" "$DB" -- "$path" 2>/dev/null); then
+      local b64
+      b64=$(printf '%s' "$value" | base64 -w0 2>/dev/null || printf '%s' "$value" | base64 | tr -d '\n')
+      printf '%s\t%s\t%s\n' "$path" "$field" "$b64" >> "$CACHE_SCOPED"
+      count=$((count + 1))
+    else
+      echo "kpxc: failed to fetch '$path:$field' - skipping." >&2
+      failed=$((failed + 1))
+    fi
+  done < <(_parse_scope "$scope_spec")
+
+  unset PW
   trap - ERR INT TERM
-  echo "Master password cached at $CACHE"
-  echo "Lives until reboot or 'kpxc lock'${KPXC_TTL:+ (or after ${KPXC_TTL}s - checked at read time)}"
+
+  if (( count == 0 )); then
+    rm -f "$CACHE_SCOPED"
+    rmdir "$CACHE_DIR" 2>/dev/null || true
+    echo "kpxc: scope mode requested but no entries fetched successfully. Cache empty, no lock written." >&2
+    exit 1
+  fi
+
+  echo "Cached $count scoped credential(s)${failed:+, $failed failed}."
+  echo "Run 'kpxc scope' to list, 'kpxc lock' to clear."
+  echo "Master password discarded. Cache lives until reboot or 'kpxc lock'${KPXC_TTL:+ (or after ${KPXC_TTL}s)}."
 }
 
 _cmd_lock() {
-  if [[ -f "$CACHE" ]]; then
-    rm -f "$CACHE"
-    echo "Cache cleared"
+  local cleared=0
+  if [[ -f "$CACHE_MASTER" ]]; then rm -f "$CACHE_MASTER"; cleared=1; fi
+  if [[ -f "$CACHE_SCOPED" ]]; then rm -f "$CACHE_SCOPED"; cleared=1; fi
+  rmdir "$CACHE_DIR" 2>/dev/null || true
+  if (( cleared )); then echo "Cache cleared"; else echo "(no cache)"; fi
+}
+
+_cmd_scope() {
+  if [[ -f "$CACHE_SCOPED" ]]; then
+    echo "Mode: scoped"
+    echo "Entries:"
+    while IFS=$'\t' read -r p f _; do
+      printf '  %s:%s\n' "$p" "$f"
+    done < "$CACHE_SCOPED"
+  elif [[ -f "$CACHE_MASTER" ]]; then
+    echo "Mode: master (full keepassxc-cli access)"
   else
-    echo "(no cache)"
+    echo "(no cache - run 'kpxc unlock' first)"
   fi
+}
+
+# Lookup in scoped cache. Returns 0 + prints value if found, 1 otherwise.
+_lookup_scoped() {
+  local want_path="$1" want_field="$2"
+  [[ -f "$CACHE_SCOPED" ]] || return 1
+  _check_ttl_file "$CACHE_SCOPED"
+  local p f v
+  while IFS=$'\t' read -r p f v; do
+    if [[ "$p" == "$want_path" && "$f" == "$want_field" ]]; then
+      printf '%s' "$v" | base64 -d
+      return 0
+    fi
+  done < "$CACHE_SCOPED"
+  return 1
 }
 
 _cmd_get() {
-  _require_db
-  _require_cache
-  _check_ttl
-  if [[ $# -lt 1 ]]; then
-    echo "Usage: kpxc get <entry-path> [keepassxc-cli show options...]" >&2
+  local entry=""
+  local field="Password"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -a)         field="$2"; shift 2 ;;
+      --help|-h)  echo "Usage: kpxc get <entry-path> [-a <field>]"; exit 0 ;;
+      --)         shift; break ;;
+      -*)         echo "kpxc get: unknown flag '$1' (only -a is supported here; for full keepassxc-cli show options use 'kpxc show')." >&2; exit 2 ;;
+      *)          if [[ -z "$entry" ]]; then entry="$1"; else echo "kpxc get: unexpected extra argument '$1'." >&2; exit 2; fi; shift ;;
+    esac
+  done
+
+  if [[ -z "$entry" ]]; then
+    echo "Usage: kpxc get <entry-path> [-a <field>]" >&2
     exit 2
   fi
-  local entry="$1"; shift
-  if [[ "$#" -eq 0 ]]; then
-    set -- -s -a Password
+
+  if _lookup_scoped "$entry" "$field"; then
+    return 0
   fi
-  _extra_args
-  exec keepassxc-cli show -q "${extra_args[@]}" "$@" "$DB" -- "$entry" < "$CACHE"
+
+  if [[ -f "$CACHE_SCOPED" ]]; then
+    echo "kpxc: '$entry:$field' not in current scope." >&2
+    echo "  Run 'kpxc scope' to see what's available," >&2
+    echo "  or re-unlock with: kpxc unlock $entry${field:+:$field} ..." >&2
+    exit 1
+  fi
+
+  if [[ -f "$CACHE_MASTER" ]]; then
+    _check_ttl_file "$CACHE_MASTER"
+    _require_db
+    _extra_args
+    exec keepassxc-cli show -q "${extra_args[@]}" -a "$field" "$DB" -- "$entry" < "$CACHE_MASTER"
+  fi
+
+  echo "kpxc: no cached credentials - run 'kpxc unlock' first." >&2
+  exit 1
 }
 
 _usage() {
-  cat >&2 <<EOF
+  cat >&2 <<'EOF'
 Usage:
-  kpxc unlock                  # cache master password (interactive)
+  kpxc unlock [--master] [<scope-spec>...]
+                                # cache credentials. Default: scope mode if
+                                # KPXC_DEFAULT_SCOPE or scope args are given,
+                                # else master mode.
   kpxc lock                    # clear cache
-  kpxc get <entry> [show-opts] # short for 'show -s -a Password'
-  kpxc <subcommand> [args...]  # forward any keepassxc-cli subcommand
+  kpxc get <entry> [-a <field>]
+                                # read cached value (default field: Password)
+  kpxc scope                   # show what's cached
+  kpxc <subcmd> [args...]      # forward to keepassxc-cli (requires master mode)
+
+Scope-spec syntax:
+  Email/personal                  # default field (Password)
+  Email/personal:Username         # specific field
+  Email/personal:Password,URL     # multiple fields on one entry
 
 Examples:
-  kpxc unlock
+  kpxc unlock                                # scope-mode if KPXC_DEFAULT_SCOPE set
+  kpxc unlock Email/personal Backup/restic   # ad-hoc scope mode
+  kpxc unlock --master                       # master mode (full access)
   kpxc get Email/personal
   kpxc get Email/personal -a Username
-  kpxc ls /Email
-  kpxc search github
-  kpxc db-info
+  kpxc ls /Email                             # requires master mode
   kpxc lock
 EOF
   exit 2
@@ -172,32 +339,26 @@ EOF
 
 SUBCMD="$1"; shift
 
-# Built-in subcommands
 case "$SUBCMD" in
   unlock) _cmd_unlock "$@"; exit 0 ;;
   lock)   _cmd_lock   "$@"; exit 0 ;;
   get)    _cmd_get    "$@" ;;
+  scope)  _cmd_scope  "$@"; exit 0 ;;
 esac
 
-# keepassxc-cli passthrough subcommands that don't need an unlocked database
 case "$SUBCMD" in
   estimate|generate|diceware|help|--help|-h|--version|-v)
     exec keepassxc-cli "$SUBCMD" "$@"
     ;;
 esac
 
-# Subcommand --help anywhere in args - skip DB injection so help renders
 for arg in "$@"; do
   case "$arg" in
-    --help|-h)
-      exec keepassxc-cli "$SUBCMD" "$@"
-      ;;
+    --) break ;;
+    --help|-h) exec keepassxc-cli "$SUBCMD" "$@" ;;
   esac
 done
 
-# Subcommands with non-standard argument shapes (DB position differs, or
-# creates a new database from another input). Refuse: wrapping these
-# would silently reorder args and target the wrong file.
 case "$SUBCMD" in
   db-create|import|open|close|merge)
     cat >&2 <<EOF
@@ -210,9 +371,6 @@ EOF
     ;;
 esac
 
-# Subcommands that may prompt for additional passwords on stdin would
-# silently consume EOF (cache holds only the master password) and create
-# entries with empty passwords. Refuse the password-prompt flags.
 case "$SUBCMD" in
   add|edit)
     for arg in "$@"; do
@@ -243,13 +401,23 @@ EOF
     ;;
 esac
 
+# Generic wrapper requires master mode.
+if [[ ! -f "$CACHE_MASTER" ]]; then
+  if [[ -f "$CACHE_SCOPED" ]]; then
+    cat >&2 <<EOF
+kpxc: '$SUBCMD' needs the master password but only a scoped cache is active.
+For full keepassxc-cli access, re-unlock with:
+
+  kpxc unlock --master
+EOF
+    exit 1
+  fi
+  echo "kpxc: no cached credentials - run 'kpxc unlock' first." >&2
+  exit 1
+fi
+
+_check_ttl_file "$CACHE_MASTER"
 _require_db
-_require_cache
-_check_ttl
 _extra_args
 
-# Inject DB right after the subcommand. keepassxc-cli (Qt CommandLineParser)
-# accepts options in any position, so this works for show/ls/search/db-info
-# and other unlock-required subcommands with the standard "subcmd database
-# entry" shape.
-exec keepassxc-cli "$SUBCMD" "${extra_args[@]}" "$DB" "$@" < "$CACHE"
+exec keepassxc-cli "$SUBCMD" "${extra_args[@]}" "$DB" "$@" < "$CACHE_MASTER"

@@ -45,7 +45,7 @@ CONFIG="${KPXC_RC:-$HOME/.config/kpxc/config}"
 SCOPE_FILE="${KPXC_SCOPE:-$HOME/.config/kpxc/scope}"
 
 _safe_perm_check() {
-  local file="$1" name="$2"
+  local file="$1"
   if [[ ! -O "$file" ]]; then
     echo "kpxc: refusing to read $file (not owned by you)." >&2
     return 1
@@ -66,7 +66,7 @@ _safe_perm_check() {
 _safe_source() {
   local cfg="$1"
   [[ -f "$cfg" ]] || return 0
-  _safe_perm_check "$cfg" "config" || return 1
+  _safe_perm_check "$cfg" || return 1
   # shellcheck source=/dev/null
   source "$cfg" || true
   return 0
@@ -139,7 +139,7 @@ _parse_scope() {
 
 _load_scope_file() {
   [[ -f "$SCOPE_FILE" ]] || return 1
-  _safe_perm_check "$SCOPE_FILE" "scope" || return 1
+  _safe_perm_check "$SCOPE_FILE" || return 1
   local lines=()
   local line
   while IFS= read -r line || [[ -n "$line" ]]; do
@@ -492,7 +492,7 @@ _cmd_scope() {
     echo "(no cache - run 'kpxc unlock' first)"
   fi
   if [[ -f "$SCOPE_FILE" ]]; then
-    if ! _safe_perm_check "$SCOPE_FILE" "scope" >/dev/null 2>&1; then
+    if ! _safe_perm_check "$SCOPE_FILE" >/dev/null 2>&1; then
       echo "kpxc: refusing to read $SCOPE_FILE (group/world-writable). Run: chmod 600 '$SCOPE_FILE'" >&2
       exit 1
     fi
